@@ -1,0 +1,23 @@
+## Name of the node
+-name erl_py_runner@local
+
+## Cookie for distributed erlang
+-setcookie erl_py_runner
+
+## Sets the maximum number of simultaneously existing processes for this system.
++P 2097152
+
+## Sets the maximum number of simultaneously existing ports for this system.
++Q 1048576
+
+## Sets the maximum number of ETS tables
++e 262144
+
+## Sets default scheduler hint for port parallelism.
++spp true
+
+## Sets the number of threads in async thread pool. Valid range is 0-1024.
+## Increase the parameter if there are many simultaneous file I/O operations.
++A 4
+
+-shutdown_time 30000
