@@ -5,11 +5,33 @@
 
 -module(erl_py_runner_app).
 -behaviour(application).
+-include("erl_py_runner.hrl").
 
--export([start/2, stop/1]).
+%%% +--------------------------------------------------------------+
+%%% |                              API                             |
+%%% +--------------------------------------------------------------+
+
+-export([
+  start/2,
+  stop/1
+]).
+
+%%% +--------------------------------------------------------------+
+%%% |                         Implementation                       |
+%%% +--------------------------------------------------------------+
 
 start(_StartType, _StartArgs) ->
-    erl_py_runner_sup:start_link().
+  case ?ENV(worker) of
+    {ok, #{environment := Environment}} ->
+      case erl_py_runner_env:ensure(Environment) of
+        ok ->
+          erl_py_runner_sup:start_link();
+        {error, Reason} ->
+          {error, Reason}
+      end;
+    _NotExists ->
+      {error, worker_config_missing}
+  end.
 
 stop(_State) ->
-    ok.
+  ok.

@@ -4,7 +4,7 @@
 %%% +--------------------------------------------------------------+
 
 -ifndef(ERL_PY_RUNNER).
--define(ERL_PY_RUNNER,1).
+-define(ERL_PY_RUNNER, 1).
 
 -define(MFA_METADATA, #{
   mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY},
@@ -19,5 +19,13 @@
 -define(LOGINFO(Text,Params),    logger:info(Text, Params, ?MFA_METADATA)).
 -define(LOGDEBUG(Text),          logger:debug(Text, [], ?MFA_METADATA)).
 -define(LOGDEBUG(Text,Params),   logger:debug(Text, Params, ?MFA_METADATA)).
+
+-define(ENV(Key, Default), application:get_env(erl_py_runner, Key, Default)).
+-define(ENV(Key), application:get_env(erl_py_runner, Key)).
+
+-define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
+-define(PYTHON_PATH(VenvDirectory@, Python@), filename:join([VenvDirectory@, "bin", Python@])).
+
+-define(WORKER_NAME, "erl_py_runner_worker_").
 
 -endif.
