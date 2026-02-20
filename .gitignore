@@ -1,14 +1,15 @@
 ### Erlang template
-.eunit
+logs
 *.o
 *.beam
 *.plt
-erl_crash.dump
+.eunit
 .concrete/DEV_MODE
+.idea
+_build
+erl_crash.dump
 erl_py_runner.iml
 rebar.lock
-_build
-.idea
 
 # rebar 2.x
 .rebar
