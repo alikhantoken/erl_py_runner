@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import builtins
 import itertools
-import logging
 import struct
 import sys
 import types
@@ -49,7 +48,15 @@ _HEADER_SIZE = 4
 _HEADER_FORMAT = "!I"
 _DRAIN_CHUNK_SIZE = 65_536
 
-logger = logging.getLogger("erl_py_runner")
+_ATOM_STATUS = Atom("status")
+_ATOM_OK = Atom("ok")
+_ATOM_ERROR = Atom("error")
+_ATOM_TYPE = Atom("type")
+_ATOM_CALL_REQUEST = Atom("call_request")
+_ATOM_REQUEST_ID = Atom("request_id")
+_ATOM_MODULE = Atom("module")
+_ATOM_FUNCTION = Atom("function")
+_ATOM_ARGS = Atom("args")
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -138,7 +145,7 @@ def _to_str(value: Any) -> str:
 
 def _ok_response(**fields: Any) -> dict[Atom, Any]:
     """Build a successful erlang response map."""
-    resp: dict[Atom, Any] = {Atom("status"): Atom("ok")}
+    resp: dict[Atom, Any] = {_ATOM_STATUS: _ATOM_OK}
 
     for k, v in fields.items():
         resp[Atom(k)] = v
@@ -148,7 +155,7 @@ def _ok_response(**fields: Any) -> dict[Atom, Any]:
 
 def _error_response(error: str) -> dict[Atom, Any]:
     """Build an error erlang response map."""
-    return {Atom("status"): Atom("error"), Atom("error"): error}
+    return {_ATOM_STATUS: _ATOM_ERROR, _ATOM_ERROR: error}
 
 
 # ---------------------------------------------------------------------------
@@ -227,11 +234,11 @@ class ErlangCaller:
         request_id = str(next(self._ids))
 
         write_message({
-            Atom("type"): Atom("call_request"),
-            Atom("request_id"): request_id,
-            Atom("module"): Atom(module),
-            Atom("function"): Atom(function),
-            Atom("args"): args,
+            _ATOM_TYPE: _ATOM_CALL_REQUEST,
+            _ATOM_REQUEST_ID: request_id,
+            _ATOM_MODULE: Atom(module),
+            _ATOM_FUNCTION: Atom(function),
+            _ATOM_ARGS: args,
         })
 
         try:
@@ -291,18 +298,6 @@ def _handle_request(
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-
-def _configure_logging() -> logging.Logger:
-    logging.getLogger("term").setLevel(logging.ERROR)
-    logger.setLevel(logging.DEBUG)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    )
-    logger.addHandler(handler)
-    return logger
-
-
 def _perform_handshake() -> dict[str, Any]:
     """Perform the initialization with the erlang worker process.
     Reads the `init` message, builds the safe-builtins dict, and sends an `ok` acknowledgement.
@@ -315,10 +310,8 @@ def _perform_handshake() -> dict[str, Any]:
     try:
         message = read_message()
     except MessageEOF:
-        logger.error("stdin closed before init message")
         _fail("stdin closed before initialization")
     except Exception as e:
-        logger.error("failed to read init message: %s", e)
         _fail("malformed initialization message")
 
     if message is None or message.get("type") != "init":
@@ -333,27 +326,21 @@ def _perform_handshake() -> dict[str, Any]:
 
 def main() -> None:
     """Entry point for the active OS python process."""
-    _configure_logging()
-    logger.info("runner starting")
     safe_builtins = _perform_handshake()
     caller = ErlangCaller()
     while True:
         try:
             message = read_message()
         except MessageEOF:
-            logger.info("stdin closed, shutting down")
             break
         except (MessageOversized, MessageTruncated) as e:
-            logger.error("message read error: %s", e)
             write_message(_error_response(str(e)))
             continue
         except Exception as e:
-            logger.error("unexpected error reading message: %s", e)
             write_message(_error_response("malformed message"))
             continue
         response = _handle_request(message, safe_builtins, caller)
         write_message(response)
-    logger.info("runner stopped")
 
 
 if __name__ == "__main__":
