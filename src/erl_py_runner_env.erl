@@ -36,38 +36,22 @@ ensure(#{
 ensure_venv(VenvDirectory, Python) ->
   case filelib:is_dir(VenvDirectory) of
     true ->
+      ?LOGINFO("venv already exists, path: ~p", [VenvDirectory]),
       ok;
     false ->
       ?LOGINFO("creating venv: ~ts, python: ~p", [VenvDirectory, Python]),
-      case run_command(Python ++ " -m venv " ++ VenvDirectory) of
-        ok ->
-          ok;
-        {error, Error} ->
-          ?LOGERROR("failed to create python venv, error: ~p", [Error]),
-          {error, {failed_create_venv, Error}}
-      end
+      run_command(Python ++ " -m venv " ++ VenvDirectory)
   end.
 
 install_deps(VenvDirectory, Requirements, Pyterm) ->
-  case run_command(?PIP_PATH(VenvDirectory) ++ " install " ++ Pyterm) of
-    ok ->
-      case filelib:is_file(Requirements) of
-        false ->
-          ?LOGWARNING("requirements file ~s not found, skipping", [Requirements]),
-          ok;
-        true ->
-          ?LOGINFO("installing python requirements from: ~s", [Requirements]),
-          case run_command(?PIP_PATH(VenvDirectory) ++ " install -r " ++ Requirements) of
-            ok ->
-              ok;
-            {error, Error} ->
-              ?LOGERROR("failed to install python requirements: ~p", [Error]),
-              {error, {pip_deps_install_failed, Error}}
-          end
-      end;
-    {error, Reason} ->
-      ?LOGERROR("failed to install pyrlang-term: ~p", [Reason]),
-      {error, {pip_install_failed, Reason}}
+  run_command(?PIP_PATH(VenvDirectory) ++ " install --upgrade pip setuptools wheel"),
+  run_command(?PIP_PATH(VenvDirectory) ++ " install " ++ Pyterm),
+  case filelib:is_file(Requirements) of
+    false ->
+      ?LOGWARNING("requirements file ~s not found, skipping", [Requirements]);
+    true ->
+      ?LOGINFO("installing python requirements from: ~s", [Requirements]),
+      run_command(?PIP_PATH(VenvDirectory) ++ " install -r " ++ Requirements)
   end.
 
 run_command(Command) ->
