@@ -18,4 +18,6 @@
 -define(CALL_STATUS_OK, ok).
 -define(CALL_STATUS_ERROR, error).
 
+-define(WORKER_NAME, "erl_py_runner_worker_").
+
 -endif.

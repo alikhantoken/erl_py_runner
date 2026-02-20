@@ -20,12 +20,13 @@
 -define(LOGDEBUG(Text),          logger:debug(Text, [], ?MFA_METADATA)).
 -define(LOGDEBUG(Text,Params),   logger:debug(Text, Params, ?MFA_METADATA)).
 
--define(ENV(Key, Default), application:get_env(erl_py_runner, Key, Default)).
--define(ENV(Key), application:get_env(erl_py_runner, Key)).
+-define(ENV(Key@, Default@), application:get_env(erl_py_runner, Key@, Default@)).
+-define(ENV(Key@), application:get_env(erl_py_runner, Key@)).
 
 -define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
 -define(PYTHON_PATH(VenvDirectory@, Python@), filename:join([VenvDirectory@, "bin", Python@])).
 
--define(WORKER_NAME, "erl_py_runner_worker_").
+-define(DEFAULT_SUP_INTENSITY, 10).
+-define(DEFAULT_SUP_PERIOD, 1000).
 
 -endif.

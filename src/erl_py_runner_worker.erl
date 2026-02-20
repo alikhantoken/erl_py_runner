@@ -13,30 +13,41 @@
 %%% +--------------------------------------------------------------+
 
 -export([
+  start_child/2,
   start/1,
-  stop/1,
-  run/2
+  run/1, run/2
 ]).
 
 %%% +--------------------------------------------------------------+
 %%% |                         Implementation                       |
 %%% +--------------------------------------------------------------+
 
+start_child(Number, Config) ->
+  {ok, PID} =
+    supervisor:start_child(erl_py_runner_worker_sup, #{
+      id => get_id(Number),
+      start => {erl_py_runner_worker, start, [Config]},
+      restart => permanent,
+      shutdown => 60000,
+      type => worker
+    }),
+  PID.
+  
 start(Config) ->
   PID =
     spawn_link(
       fun() ->
         process_flag(trap_exit, true),
         State = init(Config),
+        erl_py_runner_pool:send_worker_start(self()),
         loop(State)
       end),
   {ok, PID}.
-  
-stop(Worker) ->
-  Worker ! {stop, self()}.
 
+run(Data) ->
+  run(Data, _DefaultTimeout = 60000).
 run(Data, Timeout) ->
-  Worker = todo, % TODO. Pick worker.
+  Worker = erl_py_runner_pool:get_worker(Timeout),
   do_run(Worker, Data, Timeout).
 
 %%% +--------------------------------------------------------------+
@@ -114,11 +125,8 @@ loop(#state{port = Port} = State) ->
           ]),
           Caller ! {error, self(), Reason}
       end,
+      erl_py_runner_pool:send_worker_ready(self()),
       loop(State);
-    {stop, Caller} ->
-      ?LOGINFO("received stop from: ~p, closing port: ~p", [Caller, Port]),
-      erlang:port_close(Port),
-      exit(shutdown);
     {'EXIT', Port, Reason} ->
       ?LOGERROR("received exit from port, reason: ~p", [Reason]),
       exit(Reason);
@@ -216,3 +224,6 @@ check_module(Module, AllowedModules) ->
       ErrorMessage = iolist_to_binary(io_lib:format("module ~ts is not allowed", [Module])),
       throw({not_allowed, ErrorMessage})
   end.
+
+get_id(Index) ->
+  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Index)).

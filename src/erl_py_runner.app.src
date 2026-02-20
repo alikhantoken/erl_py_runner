@@ -1,7 +1,7 @@
 {application, erl_py_runner,
  [{description, "Erlang/OTP port driver for Python code execution"},
   {vsn, "1.0.0"},
-  {registered, []},
+  {registered, [erl_py_runner_pool, erl_py_runner_worker_sup]},
   {mod, {erl_py_runner_app, []}},
   {applications, [kernel, stdlib]},
   {env,[]},

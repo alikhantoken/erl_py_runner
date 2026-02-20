@@ -3,24 +3,30 @@
 %%% | Author: Tokenov Alikhan, alikhantokenov@gmail.com            |
 %%% +--------------------------------------------------------------+
 
--module(erl_py_runner).
+-module(erl_py_runner_worker_sup).
+-include("erl_py_runner.hrl").
+-behaviour(supervisor).
 
 %%% +--------------------------------------------------------------+
 %%% |                              API                             |
 %%% +--------------------------------------------------------------+
 
 -export([
-  run/1, run/2
+  start_link/0,
+  init/1
 ]).
 
 %%% +--------------------------------------------------------------+
 %%% |                         Implementation                       |
 %%% +--------------------------------------------------------------+
 
--spec run(term()) -> {ok, term()} | {error, term()}.
-run(Data) ->
-  run(Data, _DefaultTimeout = 60000).
+start_link() ->
+  supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec run(term(), timeout()) -> {ok, term()} | {error, term()}.
-run(Data, Timeout) ->
-  erl_py_runner_worker:run(Data, Timeout).
+init([]) ->
+  Supervisor = #{
+    strategy => one_for_one,
+    intensity => ?DEFAULT_SUP_INTENSITY,
+    period => ?DEFAULT_SUP_PERIOD
+  },
+  {ok, {Supervisor, []}}.

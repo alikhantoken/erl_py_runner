@@ -27,8 +27,7 @@ start_link() ->
 init([]) ->
   {ok, #{
     intensity := Intensity,
-    period := Period,
-    worker_shutdown := Shutdown
+    period := Period
   }} = ?ENV(supervisor),
 
   {ok, #{
@@ -48,7 +47,7 @@ init([]) ->
   }} = ?ENV(worker),
   
   Supervisor = #{
-    strategy => one_for_one,
+    strategy => one_for_all,
     intensity => Intensity,
     period => Period
   },
@@ -60,22 +59,21 @@ init([]) ->
     erlang_modules => ErlangModules
   },
   
-  Children =
-    [begin
-       #{
-         id => get_id(Index),
-         start => {erl_py_runner_worker, start, [WorkerConfig]},
-         restart => permanent,
-         shutdown => Shutdown,
-         type => worker
-       }
-     end || Index <- lists:seq(1, PoolSize)],
+  Children = [
+    #{
+      id => erl_py_runner_worker_sup,
+      start => {erl_py_runner_worker_sup, start_link, []},
+      restart => permanent,
+      shutdown => infinity,
+      type => supervisor
+    },
+    #{
+      id => erl_py_runner_pool,
+      start => {erl_py_runner_pool, start_link, [PoolSize, WorkerConfig]},
+      restart => permanent,
+      shutdown => 5000,
+      type => worker
+    }
+  ],
   
   {ok, {Supervisor, Children}}.
-
-%%% +--------------------------------------------------------------+
-%%% |                       Internal functions                     |
-%%% +--------------------------------------------------------------+
-  
-get_id(Index) ->
-  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Index)).
