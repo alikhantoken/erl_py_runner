@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
+"""Erlang port process that executes sandboxed Python code.
+
+Communicates via stdin/stdout using 4-byte length-prefixed ETF messages.
+Receives an ``init`` handshake with an allowed-modules whitelist, then
+enters a loop: reads code-execution requests, runs them via ``exec()``,
+and returns results.
+"""
 
 # +--------------------------------------------------------------+
 # | Copyright (c) 2026. All Rights Reserved.                     |
 # | Author: Tokenov Alikhan, alikhantokenov@gmail.com            |
 # +--------------------------------------------------------------+
 
-import sys
-import struct
+from __future__ import annotations
+
 import builtins
+import itertools
 import logging
-from typing import Any
+import struct
+import sys
+import types
 
-logging.getLogger("term").setLevel(logging.ERROR)
+from collections.abc import Callable
+from typing import Any, NoReturn
 
-logger = logging.getLogger("erl_py_runner")
-logger.setLevel(logging.DEBUG)
-_stderr_handler = logging.StreamHandler(sys.stderr)
-_stderr_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-)
-logger.addHandler(_stderr_handler)
-
+# REQUIRED IMPORTS FOR ERLANG TERM CONVERSION!
 from term import codec
 from term.atom import Atom
 
-MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 _DENIED_BUILTINS = frozenset({
     "__import__",
@@ -38,24 +44,64 @@ _DENIED_BUILTINS = frozenset({
     "quit",
 })
 
+_MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+_HEADER_SIZE = 4
+_HEADER_FORMAT = "!I"
+_DRAIN_CHUNK_SIZE = 65_536
+
+logger = logging.getLogger("erl_py_runner")
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
 
 class MessageEOF(Exception):
-    """Raised when stdin is closed (clean EOF)."""
+    """Raised when stdin is closed, clean EOF."""
 
 
 class MessageOversized(Exception):
-    """Raised when message exceeds MAX_MESSAGE_SIZE."""
+    """Raised when message exceeds _MAX_MESSAGE_SIZE."""
 
 
 class MessageTruncated(Exception):
     """Raised when payload is shorter than declared length."""
 
 
-def _make_restricted_import(allowed_modules: list[str]):
+class ErlangError(Exception):
+    """Raised when an erlang function call returns an error response."""
+    def __init__(self, message: str, error_type: str = "exception") -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
+
+class ErlangTimeoutError(ErlangError):
+    """Raised when an erlang function call request times out."""
+
+
+class ErlangPortError(ErlangError):
+    """Raised when the erlang port connection is lost or interrupted."""
+
+
+# ---------------------------------------------------------------------------
+# Sandbox helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_restricted_import(
+    allowed_modules: list[str],
+) -> Callable[..., types.ModuleType]:
+    """Return an `__import__` replacement that only allows `allowed_modules`."""
     allowed = frozenset(allowed_modules)
     real_import = builtins.__import__
 
-    def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):
+    def restricted_import(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> types.ModuleType:
         top_level = name.split(".")[0]
         if top_level not in allowed:
             raise ImportError(f"import of '{name}' is not allowed")
@@ -65,83 +111,121 @@ def _make_restricted_import(allowed_modules: list[str]):
 
 
 def _build_safe_builtins(allowed_modules: list[str]) -> dict[str, Any]:
+    """Build a builtins dict with dangerous names removed."""
     safe = {
         name: getattr(builtins, name)
         for name in dir(builtins)
         if name not in _DENIED_BUILTINS
     }
+
     if allowed_modules:
         safe["__import__"] = _make_restricted_import(allowed_modules)
+
     return safe
 
 
 def _to_str(value: Any) -> str:
+    """Decode bytes to UTF-8 or convert to str."""
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return str(value)
 
 
+# ---------------------------------------------------------------------------
+# Response helpers
+# ---------------------------------------------------------------------------
+
+
+def _ok_response(**fields: Any) -> dict[Atom, Any]:
+    """Build a successful erlang response map."""
+    resp: dict[Atom, Any] = {Atom("status"): Atom("ok")}
+
+    for k, v in fields.items():
+        resp[Atom(k)] = v
+
+    return resp
+
+
+def _error_response(error: str) -> dict[Atom, Any]:
+    """Build an error erlang response map."""
+    return {Atom("status"): Atom("error"), Atom("error"): error}
+
+
+# ---------------------------------------------------------------------------
+# IO / message protocol
+# ---------------------------------------------------------------------------
+
+
 def read_message() -> Any:
-    header = sys.stdin.buffer.read(4)
+    """Read a single length-prefixed ETF message from stdin."""
+    header = sys.stdin.buffer.read(_HEADER_SIZE)
+
     if len(header) == 0:
         raise MessageEOF("stdin closed")
-    if len(header) < 4:
-        raise MessageTruncated(f"expected 4-byte header, got {len(header)} bytes")
-    (length,) = struct.unpack("!I", header)
-    if length > MAX_MESSAGE_SIZE:
+
+    if len(header) < _HEADER_SIZE:
+        raise MessageTruncated(
+            f"expected {_HEADER_SIZE}-byte header, got {len(header)} bytes"
+        )
+
+    (length,) = struct.unpack(_HEADER_FORMAT, header)
+    if length > _MAX_MESSAGE_SIZE:
         remaining = length
         while remaining > 0:
-            chunk = sys.stdin.buffer.read(min(remaining, 65536))
+            chunk = sys.stdin.buffer.read(min(remaining, _DRAIN_CHUNK_SIZE))
             if not chunk:
                 break
             remaining -= len(chunk)
         raise MessageOversized(
-            f"message size {length} exceeds limit {MAX_MESSAGE_SIZE}"
+            f"message size {length} exceeds limit {_MAX_MESSAGE_SIZE}"
         )
+
     payload = sys.stdin.buffer.read(length)
     if len(payload) < length:
         raise MessageTruncated(
             f"expected {length} payload bytes, got {len(payload)}"
         )
+
     result, _remaining = codec.binary_to_term(payload)
     return result
 
 
 def write_message(data: Any) -> None:
+    """Write a single length-prefixed ETF message to stdout."""
     payload = codec.term_to_binary(data)
-    header = struct.pack("!I", len(payload))
+    header = struct.pack(_HEADER_FORMAT, len(payload))
     sys.stdout.buffer.write(header + payload)
     sys.stdout.buffer.flush()
 
-
-class ErlangError(Exception):
-    def __init__(self, message: str, error_type: str = "exception"):
-        super().__init__(message)
-        self.error_type = error_type
-
-
-class ErlangTimeoutError(ErlangError):
-    pass
-
-
-class ErlangPortError(ErlangError):
-    pass
+# ---------------------------------------------------------------------------
+# Erlang caller
+# ---------------------------------------------------------------------------
 
 
 class ErlangCaller:
-    def __init__(self):
-        self._counter = 0
+    """Manages bidirectional call requests from python back to erlang worker process.
+    Each call writes a `call_request` message to stdout and blocks reading the response
+    from stdin, using a monotonic integer request ID.
+    """
+
+    def __init__(self) -> None:
+        self._ids = itertools.count(1)
 
     def call(
         self,
         module: str,
         function: str,
-        args: list | None = None,
+        args: list[Any] | None = None,
     ) -> Any:
+        """Call an Erlang function and return its result.
+        May raise ErlangError, ErlangTimeoutError, ErlangPortError on failures.
+        """
+
         if args is None:
             args = []
-        self._counter += 1
-        request_id = str(self._counter)
+
+        request_id = str(next(self._ids))
+
         write_message({
             Atom("type"): Atom("call_request"),
             Atom("request_id"): request_id,
@@ -149,69 +233,109 @@ class ErlangCaller:
             Atom("function"): Atom(function),
             Atom("args"): args,
         })
+
         try:
             response = read_message()
         except (MessageEOF, MessageOversized, MessageTruncated) as e:
             raise ErlangPortError(
-                f"lost connection to Erlang port: {e}", "port_error"
+                f"lost connection to erlang port: {e}",
+                "port_error"
             ) from e
+
         resp_id = _to_str(response.get("request_id"))
         if resp_id != request_id:
             raise ErlangPortError(
-                f"request_id mismatch: expected {request_id}, got {resp_id}",
+                f"request id mismatch: expected {request_id}, but got {resp_id}",
                 "port_error",
             )
+
         if response.get("status") == "ok":
             return response.get("result")
+
         error_type = _to_str(response.get("error_type", "exception"))
         error_msg = _to_str(response.get("error", "unknown error"))
+
         if error_type == "timeout":
             raise ErlangTimeoutError(error_msg, error_type)
+
         raise ErlangError(error_msg, error_type)
 
 
-def handle(
+# ---------------------------------------------------------------------------
+# Request handling
+# ---------------------------------------------------------------------------
+
+
+def _handle_request(
     message: dict[str, Any],
     safe_builtins: dict[str, Any],
     caller: ErlangCaller,
-) -> dict[str, Any]:
+) -> dict[Atom, Any]:
+    """Execute a single code-execution request and return an Erlang response map."""
     code = message.get("code", b"")
+
     if isinstance(code, bytes):
         code = code.decode("utf-8")
+
     arguments = message.get("arguments", {})
-    local_vars: dict[str, Any] = {"args": arguments, "result": None, "erlang": caller}
+    local_vars: dict[str, Any] = {"arguments": arguments, "result": None, "erlang": caller}
+
     try:
         exec(code, {"__builtins__": safe_builtins}, local_vars)
-        return {Atom("status"): Atom("ok"), Atom("result"): local_vars.get("result")}
+        return _ok_response(result=local_vars.get("result"))
     except Exception as e:
-        return {Atom("status"): Atom("error"), Atom("error"): f"{type(e).__name__}: {e}"}
+        return _error_response(f"{type(e).__name__}: {e}")
 
 
-def init() -> dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _configure_logging() -> logging.Logger:
+    logging.getLogger("term").setLevel(logging.ERROR)
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+    return logger
+
+
+def _perform_handshake() -> dict[str, Any]:
+    """Perform the initialization with the erlang worker process.
+    Reads the `init` message, builds the safe-builtins dict, and sends an `ok` acknowledgement.
+    Exits the process on any failure.
+    """
+    def _fail(error: str) -> NoReturn:
+        write_message(_error_response(error))
+        sys.exit(1)
+
     try:
         message = read_message()
     except MessageEOF:
         logger.error("stdin closed before init message")
-        write_message({Atom("status"): Atom("error"), Atom("error"): "stdin closed before init"})
-        sys.exit(1)
+        _fail("stdin closed before initialization")
     except Exception as e:
         logger.error("failed to read init message: %s", e)
-        write_message({Atom("status"): Atom("error"), Atom("error"): "malformed init message"})
-        sys.exit(1)
+        _fail("malformed initialization message")
+
     if message is None or message.get("type") != "init":
-        write_message({Atom("status"): Atom("error"), Atom("error"): "expected init message"})
-        sys.exit(1)
-    allowed_modules = [
-        _to_str(m) for m in message.get("allowed_modules", [])
-    ]
+        _fail("expected initialization message")
+
+    allowed_modules = [_to_str(m) for m in message.get("allowed_modules", [])]
     safe_builtins = _build_safe_builtins(allowed_modules)
-    write_message({Atom("status"): Atom("ok")})
+    write_message(_ok_response())
+
     return safe_builtins
 
 
 def main() -> None:
+    """Entry point for the active OS python process."""
+    _configure_logging()
     logger.info("runner starting")
-    safe_builtins = init()
+    safe_builtins = _perform_handshake()
     caller = ErlangCaller()
     while True:
         try:
@@ -221,13 +345,13 @@ def main() -> None:
             break
         except (MessageOversized, MessageTruncated) as e:
             logger.error("message read error: %s", e)
-            write_message({Atom("status"): Atom("error"), Atom("error"): str(e)})
+            write_message(_error_response(str(e)))
             continue
         except Exception as e:
             logger.error("unexpected error reading message: %s", e)
-            write_message({Atom("status"): Atom("error"), Atom("error"): "malformed message"})
+            write_message(_error_response("malformed message"))
             continue
-        response = handle(message, safe_builtins, caller)
+        response = _handle_request(message, safe_builtins, caller)
         write_message(response)
     logger.info("runner stopped")
 
