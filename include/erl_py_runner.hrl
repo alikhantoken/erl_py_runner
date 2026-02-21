@@ -26,7 +26,7 @@
 -define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
 -define(PYTHON_PATH(VenvDirectory@, Python@), filename:join([VenvDirectory@, "bin", Python@])).
 
--define(DEFAULT_SUP_INTENSITY, 10).
--define(DEFAULT_SUP_PERIOD, 1000).
+-define(DEFAULT_SUP_INTENSITY, 5).
+-define(DEFAULT_SUP_PERIOD, 30).
 
 -endif.
