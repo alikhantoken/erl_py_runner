@@ -52,11 +52,22 @@ _ATOM_STATUS = Atom("status")
 _ATOM_OK = Atom("ok")
 _ATOM_ERROR = Atom("error")
 _ATOM_TYPE = Atom("type")
+_ATOM_INIT = Atom("init")
 _ATOM_CALL_REQUEST = Atom("call_request")
+_ATOM_CALL_RESPONSE = Atom("call_response")
 _ATOM_REQUEST_ID = Atom("request_id")
 _ATOM_MODULE = Atom("module")
 _ATOM_FUNCTION = Atom("function")
-_ATOM_ARGS = Atom("args")
+_ATOM_ARGUMENTS = Atom("arguments")
+_ATOM_RESULT = Atom("result")
+_ATOM_CODE = Atom("code")
+_ATOM_ARGUMENTS = Atom("arguments")
+_ATOM_ALLOWED_MODULES = Atom("allowed_modules")
+_ATOM_ERROR_TYPE = Atom("error_type")
+
+_OK_RESPONSE_KEYS = {
+    "result": _ATOM_RESULT,
+}
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -91,7 +102,7 @@ class ErlangPortError(ErlangError):
 
 
 # ---------------------------------------------------------------------------
-# Sandbox helpers
+# Script helpers
 # ---------------------------------------------------------------------------
 
 
@@ -142,13 +153,12 @@ def _to_str(value: Any) -> str:
 # Response helpers
 # ---------------------------------------------------------------------------
 
-
 def _ok_response(**fields: Any) -> dict[Atom, Any]:
     """Build a successful erlang response map."""
     resp: dict[Atom, Any] = {_ATOM_STATUS: _ATOM_OK}
 
     for k, v in fields.items():
-        resp[Atom(k)] = v
+        resp[_OK_RESPONSE_KEYS.get(k, Atom(k))] = v
 
     return resp
 
@@ -201,7 +211,7 @@ def write_message(data: Any) -> None:
     """Write a single length-prefixed ETF message to stdout."""
     payload = codec.term_to_binary(data)
     header = struct.pack(_HEADER_FORMAT, len(payload))
-    sys.stdout.buffer.write(header + payload)
+    sys.stdout.buffer.writelines([header, payload])
     sys.stdout.buffer.flush()
 
 # ---------------------------------------------------------------------------
@@ -222,14 +232,14 @@ class ErlangCaller:
         self,
         module: str,
         function: str,
-        args: list[Any] | None = None,
+        arguments: list[Any] | None = None,
     ) -> Any:
         """Call an Erlang function and return its result.
         May raise ErlangError, ErlangTimeoutError, ErlangPortError on failures.
         """
 
-        if args is None:
-            args = []
+        if arguments is None:
+            arguments = []
 
         request_id = str(next(self._ids))
 
@@ -238,7 +248,7 @@ class ErlangCaller:
             _ATOM_REQUEST_ID: request_id,
             _ATOM_MODULE: Atom(module),
             _ATOM_FUNCTION: Atom(function),
-            _ATOM_ARGS: args,
+            _ATOM_ARGUMENTS: arguments,
         })
 
         try:
@@ -249,18 +259,18 @@ class ErlangCaller:
                 "port_error"
             ) from e
 
-        resp_id = _to_str(response.get("request_id"))
-        if resp_id != request_id:
+        response_id = _to_str(response.get(_ATOM_REQUEST_ID))
+        if response_id != request_id:
             raise ErlangPortError(
-                f"request id mismatch: expected {request_id}, but got {resp_id}",
+                f"request id mismatch: expected {request_id}, but got {response_id}",
                 "port_error",
             )
 
-        if response.get("status") == "ok":
-            return response.get("result")
+        if response.get(_ATOM_STATUS) == _ATOM_OK:
+            return response.get(_ATOM_RESULT)
 
-        error_type = _to_str(response.get("error_type", "exception"))
-        error_msg = _to_str(response.get("error", "unknown error"))
+        error_type = _to_str(response.get(_ATOM_ERROR_TYPE, "exception"))
+        error_msg = _to_str(response.get(_ATOM_ERROR, "unknown error"))
 
         if error_type == "timeout":
             raise ErlangTimeoutError(error_msg, error_type)
@@ -274,17 +284,17 @@ class ErlangCaller:
 
 
 def _handle_request(
-    message: dict[str, Any],
+    message: dict[Atom, Any],
     safe_builtins: dict[str, Any],
     caller: ErlangCaller,
 ) -> dict[Atom, Any]:
     """Execute a single code-execution request and return an Erlang response map."""
-    code = message.get("code", b"")
+    code = message.get(_ATOM_CODE, b"")
 
     if isinstance(code, bytes):
         code = code.decode("utf-8")
 
-    arguments = message.get("arguments", {})
+    arguments = message.get(_ATOM_ARGUMENTS, {})
     local_vars: dict[str, Any] = {"arguments": arguments, "result": None, "erlang": caller}
 
     try:
@@ -314,10 +324,10 @@ def _perform_handshake() -> dict[str, Any]:
     except Exception as e:
         _fail("malformed initialization message")
 
-    if message is None or message.get("type") != "init":
+    if message is None or message.get(_ATOM_TYPE) != _ATOM_INIT:
         _fail("expected initialization message")
 
-    allowed_modules = [_to_str(m) for m in message.get("allowed_modules", [])]
+    allowed_modules = [_to_str(m) for m in message.get(_ATOM_ALLOWED_MODULES, [])]
     safe_builtins = _build_safe_builtins(allowed_modules)
     write_message(_ok_response())
 
