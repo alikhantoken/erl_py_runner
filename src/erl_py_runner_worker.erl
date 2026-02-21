@@ -208,7 +208,7 @@ handle_call(
         status => ?CALL_STATUS_OK,
         type => ?CALL_RESPONSE,
         request_id => RequestID,
-        result => Module:Function(Args)
+        result => erlang:apply(Module, Function, Arguments)
       }
     catch
       throw:{ErrorType, ErrorMessage}
