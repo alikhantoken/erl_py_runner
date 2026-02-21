@@ -37,6 +37,7 @@ init([]) ->
       venv_dir := VenvDirectory
     },
     config := #{
+      max_pending := MaxPending,
       pool_size := PoolSize,
       timeout := Timeout
     },
@@ -69,7 +70,7 @@ init([]) ->
     },
     #{
       id => erl_py_runner_pool,
-      start => {erl_py_runner_pool, start_link, [PoolSize, WorkerConfig]},
+      start => {erl_py_runner_pool, start_link, [PoolSize, MaxPending, WorkerConfig]},
       restart => permanent,
       shutdown => 5000,
       type => worker

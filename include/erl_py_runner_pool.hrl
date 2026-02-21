@@ -12,7 +12,8 @@
 
 -record(pool, {
   idle,
-  pending
+  pending,
+  max_pending
 }).
 
 -endif.
