@@ -54,8 +54,6 @@ groups() ->
       parallel_mix
     ]},
     {error_handling, [sequence], [
-      missing_code,
-      missing_arguments,
       python_runtime,
       python_syntax
     ]}].
@@ -90,43 +88,34 @@ end_per_testcase(_TestCase, _Config) ->
 
 simple_result(_Config) ->
   Code = <<"result = 42">>,
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(42, Result).
 
 arithmetic_calculation(_Config) ->
   Code = <<"result = arguments['a'] + arguments['b']">>,
   Arguments = #{a => 5, b => 10},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, Arguments),
   ?assertEqual(15, Result).
 
 string_concatenation(_Config) ->
   Code = <<"result = arguments['first'].decode('utf-8') + ' ' + arguments['second'].decode('utf-8')">>,
   Arguments = #{first => <<"hello">>, second => <<"world">>},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, Arguments),
   ?assertEqual("hello world", Result).
 
 list_operation(_Config) ->
   Code = <<"result = list(range(1, 6))">>,
-  Arguments = #{},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual([1, 2, 3, 4, 5], Result).
 
 dictionary_operation(_Config) ->
   Code = <<"result = {'name': 'Bobby', 'age': 777}">>,
-  Arguments = #{},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(#{"name" => "Bobby", "age" => 777}, Result).
 
 non_as_result(_Config) ->
   Code = <<"pass">>,
-  Arguments = #{},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(undefined, Result).
 
 %%% +--------------------------------------------------------------+
@@ -135,33 +124,26 @@ non_as_result(_Config) ->
 
 import_allowed_module(_Config) ->
   Code = <<"import math\nresult = math.sqrt(16)">>,
-  Arguments = #{},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(4.0, Result).
 
 import_allowed_json_module(_Config) ->
   Code = <<"import json\nresult = json.dumps({'key': 'value'}).encode('utf-8')">>,
-  Arguments = #{},
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => Arguments}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(true, is_binary(Result)),
   ?assertEqual(#{<<"key">> => <<"value">>}, json:decode(Result)).
 
 import_disallowed_module(_Config) ->
   Code = <<"import os\nresult = os.getcwd()">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 import_disallowed_subprocess(_Config) ->
   Code = <<"import subprocess\nresult = subprocess.run(['ls'])">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 disallowed_file_read(_Config) ->
   Code = <<"f = open('/etc/passwd')\nresult = f.read()">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 %%% +--------------------------------------------------------------+
 %%% |                 Group: erlang_call_requests                      |
@@ -169,36 +151,30 @@ disallowed_file_read(_Config) ->
 
 call_math_module(_Config) ->
   Code = <<"result = erlang.call('math', 'sqrt', [144])">>,
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(12.0, Result).
 
 call_lists_module(_Config) ->
   Code = <<"result = erlang.call('lists', 'reverse', [[1, 2, 3]])">>,
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual([3, 2, 1], Result).
 
 call_erlang_module(_Config) ->
   Code = <<"result = erlang.call('erlang', 'length', [[1, 2, 3]])">>,
-  {ok, #{status := ok, result := Result}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}),
+  {ok, Result} = erl_py_runner:run(Code, #{}),
   ?assertEqual(3, Result).
 
 call_disallowed_module(_Config) ->
   Code = <<"result = erlang.call('file', 'read_file', ['/etc/passwd'])">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 call_invalid_function(_Config) ->
   Code = <<"result = erlang.call('math', 'nonexistent_func', [1])">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 call_bad_arity(_Config) ->
   Code = <<"result = erlang.call('math', 'sqrt', [1, 2])">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 %%% +--------------------------------------------------------------+
 %%% |                 Group: parallel_execution                    |
@@ -209,10 +185,10 @@ parallel_basic(_Config) ->
   Results =
     parallel_run(N,
       fun(_I) ->
-        #{code => <<"result = 42">>, arguments => #{}}
+        {<<"result = 42">>, #{}}
       end),
   lists:foreach(
-    fun({ok, #{status := ok, result := 42}}) -> ok end,
+    fun({ok, 42}) -> ok end,
     Results
   ).
 
@@ -221,11 +197,10 @@ parallel_arguments(_Config) ->
   Results =
     parallel_run(N,
       fun(I) ->
-        #{code => <<"result = arguments['index'] * 2">>,
-          arguments => #{index => I}}
+        {<<"result = arguments['index'] * 2">>, #{index => I}}
       end),
   lists:foreach(
-    fun({I, {ok, #{status := ok, result := R}}}) ->
+    fun({I, {ok, R}}) ->
       Expected = I * 2,
       Expected = R
     end,
@@ -238,19 +213,17 @@ parallel_mix(_Config) ->
     parallel_run(N,
       fun
         (I) when I rem 2 =:= 0 ->
-          #{code => <<"result = arguments['index']">>,
-            arguments => #{index => I}};
+          {<<"result = arguments['index']">>, #{index => I}};
         (I) ->
-          #{code => <<"raise ValueError('odd index')">>,
-            arguments => #{index => I}}
+          {<<"raise ValueError('odd index')">>, #{index => I}}
       end),
   lists:foreach(
     fun({I, Result}) ->
       case I rem 2 of
         0 ->
-          {ok, #{status := ok, result := I}} = Result;
+          {ok, I} = Result;
         1 ->
-          {ok, #{status := error, error := _}} = Result
+          {error, _} = Result
       end
     end,
     lists:zip(lists:seq(1, N), Results)
@@ -260,38 +233,25 @@ parallel_mix(_Config) ->
 %%% |                 Group: error_handling                        |
 %%% +--------------------------------------------------------------+
 
-missing_code(_Config) ->
-  ?assertEqual(
-    {error, invalid_inputs},
-    erl_py_runner:run(#{arguments => #{}})
-  ).
-
-missing_arguments(_Config) ->
-  ?assertEqual(
-    {error, invalid_inputs},
-    erl_py_runner:run(#{code => <<"result = 1">>})
-  ).
-
 python_runtime(_Config) ->
   Code = <<"result = 1 / 0">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 python_syntax(_Config) ->
   Code = <<"def f(\nresult = 1">>,
-  {ok, #{status := error, error := _}} =
-    erl_py_runner:run(#{code => Code, arguments => #{}}).
+  {error, _} = erl_py_runner:run(Code, #{}).
 
 %%% +--------------------------------------------------------------+
 %%% |                         Helpers                              |
 %%% +--------------------------------------------------------------+
 
-parallel_run(N, ScriptFun) ->
+parallel_run(N, Fun) ->
   Parent = self(),
   PIDs =
     [spawn_link(
       fun() ->
-        Result = erl_py_runner:run(ScriptFun(I)),
+        {Code, Arguments} = Fun(I),
+        Result = erl_py_runner:run(Code, Arguments),
         Parent ! {self(), Result}
       end) || I <- lists:seq(1, N)],
   [receive {PID, Result} -> Result end || PID <- PIDs].

@@ -48,26 +48,12 @@ _HEADER_SIZE = 4
 _HEADER_FORMAT = "!I"
 _DRAIN_CHUNK_SIZE = 65_536
 
-_ATOM_STATUS = Atom("status")
 _ATOM_OK = Atom("ok")
 _ATOM_ERROR = Atom("error")
-_ATOM_TYPE = Atom("type")
 _ATOM_INIT = Atom("init")
-_ATOM_CALL_REQUEST = Atom("call_request")
-_ATOM_CALL_RESPONSE = Atom("call_response")
-_ATOM_REQUEST_ID = Atom("request_id")
-_ATOM_MODULE = Atom("module")
-_ATOM_FUNCTION = Atom("function")
-_ATOM_ARGUMENTS = Atom("arguments")
-_ATOM_RESULT = Atom("result")
-_ATOM_CODE = Atom("code")
-_ATOM_ARGUMENTS = Atom("arguments")
-_ATOM_ALLOWED_MODULES = Atom("allowed_modules")
-_ATOM_ERROR_TYPE = Atom("error_type")
-
-_OK_RESPONSE_KEYS = {
-    "result": _ATOM_RESULT,
-}
+_ATOM_EXEC = Atom("exec")
+_ATOM_CALL = Atom("call")
+_ATOM_CALL_REPLY = Atom("call_reply")
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -115,28 +101,29 @@ def _make_restricted_import(
 
     def restricted_import(
         name: str,
-        globals: dict[str, Any] | None = None,
-        locals: dict[str, Any] | None = None,
+        _globals: dict[str, Any] | None = None,
+        _locals: dict[str, Any] | None = None,
         fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> types.ModuleType:
         top_level = name.split(".")[0]
         if top_level not in allowed:
             raise ImportError(f"import of '{name}' is not allowed")
-        return real_import(name, globals, locals, fromlist, level)
+        return real_import(name, _globals, _locals, fromlist, level)
 
     return restricted_import
 
 
-def _build_safe_builtins(allowed_modules: list[str]) -> dict[str, Any]:
-    """Build a builtins dict with dangerous names removed."""
+def _build_safe_builtins(allowed_modules: list[str] | None) -> dict[str, Any]:
     safe = {
         name: getattr(builtins, name)
         for name in dir(builtins)
         if name not in _DENIED_BUILTINS
     }
 
-    if allowed_modules:
+    if allowed_modules is None:
+        safe["__import__"] = builtins.__import__
+    elif allowed_modules:
         safe["__import__"] = _make_restricted_import(allowed_modules)
 
     return safe
@@ -153,19 +140,13 @@ def _to_str(value: Any) -> str:
 # Response helpers
 # ---------------------------------------------------------------------------
 
-def _ok_response(**fields: Any) -> dict[Atom, Any]:
-    """Build a successful erlang response map."""
-    resp: dict[Atom, Any] = {_ATOM_STATUS: _ATOM_OK}
 
-    for k, v in fields.items():
-        resp[_OK_RESPONSE_KEYS.get(k, Atom(k))] = v
-
-    return resp
+def _ok_response(result: Any) -> tuple:
+    return _ATOM_OK, result
 
 
-def _error_response(error: str) -> dict[Atom, Any]:
-    """Build an error erlang response map."""
-    return {_ATOM_STATUS: _ATOM_ERROR, _ATOM_ERROR: error}
+def _error_response(error: str) -> tuple:
+    return _ATOM_ERROR, error
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +202,7 @@ def write_message(data: Any) -> None:
 
 class ErlangCaller:
     """Manages bidirectional call requests from python back to erlang worker process.
-    Each call writes a `call_request` message to stdout and blocks reading the response
+    Each call writes a ``call`` tuple to stdout and blocks reading the ``call_reply``
     from stdin, using a monotonic integer request ID.
     """
 
@@ -235,47 +216,51 @@ class ErlangCaller:
         arguments: list[Any] | None = None,
     ) -> Any:
         """Call an Erlang function and return its result.
-        May raise ErlangError, ErlangTimeoutError, ErlangPortError on failures.
+        May raise ErlangError, ErlangPortError on failures.
         """
-
         if arguments is None:
             arguments = []
 
-        request_id = str(next(self._ids))
+        request_id = next(self._ids)
 
-        write_message({
-            _ATOM_TYPE: _ATOM_CALL_REQUEST,
-            _ATOM_REQUEST_ID: request_id,
-            _ATOM_MODULE: Atom(module),
-            _ATOM_FUNCTION: Atom(function),
-            _ATOM_ARGUMENTS: arguments,
-        })
+        write_message((
+            _ATOM_CALL,
+            request_id,
+            Atom(module),
+            Atom(function),
+            arguments,
+        ))
 
         try:
             response = read_message()
         except (MessageEOF, MessageOversized, MessageTruncated) as e:
             raise ErlangPortError(
                 f"lost connection to erlang port: {e}",
-                "port_error"
+                "port_error",
             ) from e
 
-        response_id = _to_str(response.get(_ATOM_REQUEST_ID))
+        if (
+            not isinstance(response, tuple)
+            or len(response) != 3
+            or response[0] != _ATOM_CALL_REPLY
+        ):
+            raise ErlangPortError("unexpected response format", "port_error")
+
+        _, response_id, result = response
+
         if response_id != request_id:
             raise ErlangPortError(
                 f"request id mismatch: expected {request_id}, but got {response_id}",
                 "port_error",
             )
 
-        if response.get(_ATOM_STATUS) == _ATOM_OK:
-            return response.get(_ATOM_RESULT)
+        if isinstance(result, tuple) and len(result) == 2 and result[0] == _ATOM_OK:
+            return result[1]
 
-        error_type = _to_str(response.get(_ATOM_ERROR_TYPE, "exception"))
-        error_msg = _to_str(response.get(_ATOM_ERROR, "unknown error"))
+        if isinstance(result, tuple) and len(result) == 2 and result[0] == _ATOM_ERROR:
+            raise ErlangError(_to_str(result[1]))
 
-        if error_type == "timeout":
-            raise ErlangTimeoutError(error_msg, error_type)
-
-        raise ErlangError(error_msg, error_type)
+        raise ErlangPortError("malformed callback result", "port_error")
 
 
 # ---------------------------------------------------------------------------
@@ -284,22 +269,24 @@ class ErlangCaller:
 
 
 def _handle_request(
-    message: dict[Atom, Any],
+    message: Any,
     safe_builtins: dict[str, Any],
     caller: ErlangCaller,
-) -> dict[Atom, Any]:
-    """Execute a single code-execution request and return an Erlang response map."""
-    code = message.get(_ATOM_CODE, b"")
+) -> tuple:
+    """Execute a single code-execution request and return a response tuple."""
+    if not isinstance(message, tuple) or len(message) != 3 or message[0] != _ATOM_EXEC:
+        return _error_response("invalid message format")
+
+    _, code, arguments = message
 
     if isinstance(code, bytes):
         code = code.decode("utf-8")
 
-    arguments = message.get(_ATOM_ARGUMENTS, {})
     local_vars: dict[str, Any] = {"arguments": arguments, "result": None, "erlang": caller}
 
     try:
         exec(code, {"__builtins__": safe_builtins}, local_vars)
-        return _ok_response(result=local_vars.get("result"))
+        return _ok_response(local_vars.get("result"))
     except Exception as e:
         return _error_response(f"{type(e).__name__}: {e}")
 
@@ -310,7 +297,8 @@ def _handle_request(
 
 def _perform_handshake() -> dict[str, Any]:
     """Perform the initialization with the erlang worker process.
-    Reads the `init` message, builds the safe-builtins dict, and sends an `ok` acknowledgement.
+    Reads the ``(init, AllowedModules)`` tuple, builds the safe-builtins dict,
+    and sends an ``ok`` acknowledgement.
     Exits the process on any failure.
     """
     def _fail(error: str) -> NoReturn:
@@ -321,15 +309,20 @@ def _perform_handshake() -> dict[str, Any]:
         message = read_message()
     except MessageEOF:
         _fail("stdin closed before initialization")
-    except Exception as e:
+    except Exception:
         _fail("malformed initialization message")
 
-    if message is None or message.get(_ATOM_TYPE) != _ATOM_INIT:
+    if not isinstance(message, tuple) or len(message) != 2 or message[0] != _ATOM_INIT:
         _fail("expected initialization message")
 
-    allowed_modules = [_to_str(m) for m in message.get(_ATOM_ALLOWED_MODULES, [])]
+    raw_modules = message[1]
+    if raw_modules == Atom("all"):
+        allowed_modules = None
+    else:
+        allowed_modules = [_to_str(m) for m in raw_modules]
     safe_builtins = _build_safe_builtins(allowed_modules)
-    write_message(_ok_response())
+
+    write_message(_ATOM_OK)
 
     return safe_builtins
 

@@ -10,7 +10,7 @@
 %%% +--------------------------------------------------------------+
 
 -export([
-  run/1, run/2,
+  run/2, run/3,
   restart/0
 ]).
 
@@ -18,13 +18,13 @@
 %%% |                         Implementation                       |
 %%% +--------------------------------------------------------------+
 
--spec run(term()) -> {ok, term()} | {error, term()}.
-run(Data) ->
-  run(Data, _DefaultTimeout = 60000).
+-spec run(binary(), term()) -> {ok, term()} | {error, term()}.
+run(Code, Arguments) ->
+  run(Code, Arguments, _DefaultTimeout = 60000).
 
--spec run(term(), timeout()) -> {ok, term()} | {error, term()}.
-run(Data, Timeout) ->
-  erl_py_runner_worker:run(Data, Timeout).
+-spec run(binary(), term(), timeout()) -> {ok, term()} | {error, term()}.
+run(Code, Arguments, Timeout) ->
+  erl_py_runner_worker:run(Code, Arguments, Timeout).
   
 -spec restart() -> ok | {error, term()}.
 restart() ->

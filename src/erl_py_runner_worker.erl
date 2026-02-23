@@ -15,7 +15,7 @@
 -export([
   start_child/2,
   start/1,
-  run/1, run/2
+  run/2, run/3
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -45,19 +45,19 @@ start(Config) ->
       end),
   {ok, PID}.
 
-run(Data) ->
-  run(Data, _DefaultTimeout = 60000).
-run(Data, Timeout) ->
+run(Code, Arguments) ->
+  run(Code, Arguments, _DefaultTimeout = 60000).
+run(Code, Arguments, Timeout) ->
   Worker = erl_py_runner_pool:get_worker(Timeout),
-  do_run(Worker, Data, Timeout).
+  do_run(Worker, Code, Arguments, Timeout).
 
 %%% +--------------------------------------------------------------+
 %%% |                       Internal functions                     |
 %%% +--------------------------------------------------------------+
 
-do_run(Worker, Data, Timeout) ->
+do_run(Worker, Code, Arguments, Timeout) ->
   Ref = erlang:monitor(process, Worker),
-  Worker ! {run, self(), Data},
+  Worker ! {run, self(), Code, Arguments},
   receive
     {complete, Worker, Output} ->
       erlang:demonitor(Ref, [flush]),
@@ -83,9 +83,7 @@ init(#{
       {spawn, Runner},
       [{packet, 4}, binary, exit_status]
     ),
-  init_port(Port, Timeout, AllowedPythonModules),
-  
-  
+  handshake(Port, Timeout, AllowedPythonModules),
   #state{
     port = Port,
     timeout = Timeout,
@@ -97,17 +95,13 @@ init(#{
       end
   }.
 
-init_port(Port, Timeout, AllowedModules) ->
-  Payload =
-    erlang:term_to_binary(#{
-      type => init,
-      allowed_modules => AllowedModules
-    }),
+handshake(Port, Timeout, AllowedModules) ->
+  Payload = erlang:term_to_binary({init, AllowedModules}),
   erlang:port_command(Port, Payload, [nosuspend]),
   receive
     {Port, {data, Response}} ->
       case erlang:binary_to_term(Response) of
-        #{status := ?CALL_STATUS_OK} ->
+        ?CALL_STATUS_OK ->
           ok;
         #{status := ?CALL_STATUS_ERROR, error := Error} ->
           ?LOGERROR("received error from port during initialization: ~p, error: ~p", [
@@ -115,7 +109,9 @@ init_port(Port, Timeout, AllowedModules) ->
             Error
           ]),
           erlang:port_close(Port),
-          exit({initialization_fail, Error})
+          exit({initialization_fail, Error});
+        _Response ->
+          ?LOGINFO("[debug] RESPONSE: ~p", [erlang:binary_to_term(Response)])
       end;
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
@@ -128,12 +124,12 @@ init_port(Port, Timeout, AllowedModules) ->
   
 loop(#state{port = Port} = State) ->
   receive
-    {run, Caller, Data} ->
-      case send_data(Data, State) of
+    {run, Caller, Code, Arguments} ->
+      case send_data(Code, Arguments, State) of
         {ok, Output} ->
           send_complete(Caller, Output);
         {error, Reason} ->
-          ?LOGERROR("failed send data to port: ~p, caller: ~p, reason: ~p", [
+          ?LOGERROR("failed to execute script on port: ~p, caller: ~p, reason: ~p", [
             Port,
             Caller,
             Reason
@@ -155,25 +151,28 @@ loop(#state{port = Port} = State) ->
   end.
   
 send_data(
-  #{code := _, arguments := _} = Inputs,
+  Code,
+  Arguments,
   #state{port = Port} = State
 ) ->
-  case send_command(Port, Inputs) of
+  case send_command(Port, {exec, Code, Arguments}) of
     ok -> wait_data(State);
     error -> {error, aborted}
   end;
-send_data(_Inputs, _State) ->
+send_data(_Code, _Arguments, _State) ->
   {error, invalid_inputs}.
 
 wait_data(#state{port = Port, timeout = Timeout} = State) ->
   receive
     {Port, {data, Data}} ->
       case erlang:binary_to_term(Data) of
-        #{type := ?CALL_REQUEST} = CallRequest ->
-          handle_call(State, CallRequest),
+        {ok, Response} ->
+          {ok, Response};
+        {call, RequestID, Module, Function, Arguments} ->
+          handle_call(State, RequestID, Module, Function, Arguments),
           wait_data(State);
-        Response ->
-          {ok, Response}
+        {error, Error} ->
+          {error, Error}
       end;
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
@@ -194,38 +193,22 @@ handle_call(
     port = Port,
     allowed_modules = AllowedModules
   },
-  #{
-    request_id := RequestID,
-    module := Module,
-    function := Function,
-    arguments := Arguments
-  }
+  RequestID,
+  Module,
+  Function,
+  Arguments
 ) ->
   Response =
     try
+      % TODO: Check if module & function exists
       check_module(Module, AllowedModules),
-      #{
-        status => ?CALL_STATUS_OK,
-        type => ?CALL_RESPONSE,
-        request_id => RequestID,
-        result => erlang:apply(Module, Function, Arguments)
-      }
+      {call_reply, RequestID, {ok, erlang:apply(Module, Function, Arguments)}}
     catch
       throw:{ErrorType, ErrorMessage}
         when ErrorType =:= not_found orelse ErrorType =:= not_allowed ->
-        #{
-          status => ?CALL_STATUS_ERROR,
-          type => ?CALL_RESPONSE,
-          request_id => RequestID,
-          error => ErrorMessage
-        };
+        {call_reply, RequestID, {error, ErrorMessage}};
       _Class:Error ->
-        #{
-          status => ?CALL_STATUS_ERROR,
-          type => ?CALL_RESPONSE,
-          request_id => RequestID,
-          error => iolist_to_binary(io_lib:format("~p", [Error]))
-        }
+        {call_reply, RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))}}
     end,
   send_command(Port, Response).
 
