@@ -13,7 +13,8 @@
 
 -export([
   start/2,
-  stop/1
+  stop/1,
+  restart/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -33,6 +34,13 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
   ok.
 
-%%% +--------------------------------------------------------------+
-%%% |                       Internal functions                      |
-%%% +--------------------------------------------------------------+
+restart() ->
+  case application:stop(?APP_NAME) of
+    ok ->
+      case application:start(?APP_NAME) of
+        ok -> ok;
+        {error, Reason} -> {error, {start_failed, Reason}}
+      end;
+    {error, Reason} ->
+      {error, {stop_failed, Reason}}
+  end.
