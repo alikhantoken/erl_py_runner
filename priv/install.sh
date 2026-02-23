@@ -5,6 +5,15 @@ VENV_DIR="$1"
 REQUIREMENTS="$2"
 PIP="$VENV_DIR/bin/pip"
 
+MARKER="$VENV_DIR/.installed"
+REQ_HASH=$(sha256sum "$REQUIREMENTS" 2>/dev/null | cut -d' ' -f1 || true)
+STORED_HASH=$(cat "$MARKER" 2>/dev/null || true)
+
+if [ "$REQ_HASH" = "$STORED_HASH" ] && [ -f "$VENV_DIR/bin/activate" ]; then
+  echo "environment up to date, skipping install"
+  exit 0
+fi
+
 echo "virtual environment path set to: $VENV_DIR"
 echo "requirements file path: $REQUIREMENTS"
 
@@ -26,3 +35,5 @@ if [ -f "$REQUIREMENTS" ]; then
 else
   echo "WARNING! requirements file $REQUIREMENTS not found, skipping"
 fi
+
+echo "$REQ_HASH" > "$MARKER"
