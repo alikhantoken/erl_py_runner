@@ -79,10 +79,6 @@ class ErlangError(Exception):
         self.error_type = error_type
 
 
-class ErlangTimeoutError(ErlangError):
-    """Raised when an erlang function call request times out."""
-
-
 class ErlangPortError(ErlangError):
     """Raised when the erlang port connection is lost or interrupted."""
 
@@ -108,7 +104,7 @@ def _make_restricted_import(
     ) -> types.ModuleType:
         top_level = name.split(".")[0]
         if top_level not in allowed:
-            raise ImportError(f"import of '{name}' is not allowed")
+            raise ImportError(f"Import of '{name}' is not allowed")
         return real_import(name, _globals, _locals, fromlist, level)
 
     return restricted_import
@@ -163,7 +159,7 @@ def read_message() -> Any:
 
     if len(header) < _HEADER_SIZE:
         raise MessageTruncated(
-            f"expected {_HEADER_SIZE}-byte header, got {len(header)} bytes"
+            f"Expected {_HEADER_SIZE}-byte header, got {len(header)} bytes"
         )
 
     (length,) = struct.unpack(_HEADER_FORMAT, header)
@@ -175,13 +171,13 @@ def read_message() -> Any:
                 break
             remaining -= len(chunk)
         raise MessageOversized(
-            f"message size {length} exceeds limit {_MAX_MESSAGE_SIZE}"
+            f"Message size {length} exceeds limit {_MAX_MESSAGE_SIZE}"
         )
 
     payload = sys.stdin.buffer.read(length)
     if len(payload) < length:
         raise MessageTruncated(
-            f"expected {length} payload bytes, got {len(payload)}"
+            f"Expected {length} payload bytes, got {len(payload)}"
         )
 
     result, _remaining = codec.binary_to_term(payload)
@@ -235,7 +231,7 @@ class ErlangCaller:
             response = read_message()
         except (MessageEOF, MessageOversized, MessageTruncated) as e:
             raise ErlangPortError(
-                f"lost connection to erlang port: {e}",
+                f"Lost connection to erlang port: {e}",
                 "port_error",
             ) from e
 
@@ -244,13 +240,13 @@ class ErlangCaller:
             or len(response) != 3
             or response[0] != _ATOM_CALL_REPLY
         ):
-            raise ErlangPortError("unexpected response format", "port_error")
+            raise ErlangPortError("Unexpected response format", "port_error")
 
         _, response_id, result = response
 
         if response_id != request_id:
             raise ErlangPortError(
-                f"request id mismatch: expected {request_id}, but got {response_id}",
+                f"RequestID mismatch: expected {request_id}, but got {response_id}",
                 "port_error",
             )
 
@@ -260,7 +256,7 @@ class ErlangCaller:
         if isinstance(result, tuple) and len(result) == 2 and result[0] == _ATOM_ERROR:
             raise ErlangError(_to_str(result[1]))
 
-        raise ErlangPortError("malformed callback result", "port_error")
+        raise ErlangPortError("Malformed callback result", "port_error")
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +271,7 @@ def _handle_request(
 ) -> tuple:
     """Execute a single code-execution request and return a response tuple."""
     if not isinstance(message, tuple) or len(message) != 3 or message[0] != _ATOM_EXEC:
-        return _error_response("invalid message format")
+        return _error_response("Invalid message format")
 
     _, code, arguments = message
 
@@ -287,6 +283,8 @@ def _handle_request(
     try:
         exec(code, {"__builtins__": safe_builtins}, local_vars)
         return _ok_response(local_vars.get("result"))
+    except SystemExit:
+        return _error_response("SystemExit is not allowed")
     except Exception as e:
         return _error_response(f"{type(e).__name__}: {e}")
 
@@ -331,6 +329,7 @@ def main() -> None:
     """Entry point for the active OS python process."""
     safe_builtins = _perform_handshake()
     caller = ErlangCaller()
+
     while True:
         try:
             message = read_message()
@@ -340,11 +339,15 @@ def main() -> None:
             write_message(_error_response(str(e)))
             continue
         except Exception as e:
-            write_message(_error_response("malformed message"))
+            write_message(_error_response("Malformed message"))
             continue
-        response = _handle_request(message, safe_builtins, caller)
-        write_message(response)
 
+        response = _handle_request(message, safe_builtins, caller)
+
+        try:
+            write_message(response)
+        except (BrokenPipeError, OSError):
+            break
 
 if __name__ == "__main__":
     main()

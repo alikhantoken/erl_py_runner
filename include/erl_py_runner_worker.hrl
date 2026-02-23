@@ -12,11 +12,9 @@
   allowed_modules = all
 }).
 
--define(CALL_REQUEST, call_request).
--define(CALL_RESPONSE, call_response).
-
--define(CALL_STATUS_OK, ok).
--define(CALL_STATUS_ERROR, error).
+-define(COMMAND_EXECUTE(Code, Arguments), {exec, Code, Arguments}).
+-define(COMMAND_INIT(Modules), {init, Modules}).
+-define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
 
 -define(WORKER_NAME, "erl_py_runner_worker_").
 

@@ -55,21 +55,32 @@ run(Code, Arguments, Timeout) ->
 %%% |                       Internal functions                     |
 %%% +--------------------------------------------------------------+
 
+new_worker_id(Number) ->
+  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Number)).
+  
+send_ok(Caller, CallRef, Output) ->
+  Caller ! {complete, CallRef, Output}.
+
+send_error(Caller, CallRef, Error) ->
+  Caller ! {error, CallRef, Error}.
+
 do_run(Worker, Code, Arguments, Timeout) ->
-  Ref = erlang:monitor(process, Worker),
-  Worker ! {run, self(), Code, Arguments},
+  MonitorRef = erlang:monitor(process, Worker),
+  CallRef = erlang:make_ref(),
+  Worker ! {run, self(), CallRef, Code, Arguments},
   receive
-    {complete, Worker, Output} ->
-      erlang:demonitor(Ref, [flush]),
+    {complete, CallRef, Output} ->
+      erlang:demonitor(MonitorRef, [flush]),
       {ok, Output};
-    {error, Worker, Error} ->
-      erlang:demonitor(Ref, [flush]),
+    {error, CallRef, Error} ->
+      erlang:demonitor(MonitorRef, [flush]),
       {error, Error};
-    {'DOWN', Ref, process, Worker, Reason} ->
+    {'DOWN', MonitorRef, process, Worker, Reason} ->
       {error, Reason}
-  after Timeout ->
-    erlang:demonitor(Ref, [flush]),
-    {error, timeout}
+  after
+    Timeout ->
+      erlang:demonitor(MonitorRef, [flush]),
+      {error, timeout}
   end.
 
 init(#{
@@ -96,22 +107,19 @@ init(#{
   }.
 
 handshake(Port, Timeout, AllowedModules) ->
-  Payload = erlang:term_to_binary({init, AllowedModules}),
-  erlang:port_command(Port, Payload, [nosuspend]),
+  try_port_command(Port, ?COMMAND_INIT(AllowedModules)),
   receive
     {Port, {data, Response}} ->
       case erlang:binary_to_term(Response) of
-        ?CALL_STATUS_OK ->
+        ok ->
           ok;
-        #{status := ?CALL_STATUS_ERROR, error := Error} ->
+        {error, Error} ->
           ?LOGERROR("received error from port during initialization: ~p, error: ~p", [
             Port,
             Error
           ]),
           erlang:port_close(Port),
-          exit({initialization_fail, Error});
-        _Response ->
-          ?LOGINFO("[debug] RESPONSE: ~p", [erlang:binary_to_term(Response)])
+          exit({initialization_fail, Error})
       end;
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
@@ -124,17 +132,17 @@ handshake(Port, Timeout, AllowedModules) ->
   
 loop(#state{port = Port} = State) ->
   receive
-    {run, Caller, Code, Arguments} ->
-      case send_data(Code, Arguments, State) of
+    {run, Caller, CallRef, Code, Arguments} ->
+      case send_run_command(Code, Arguments, State) of
         {ok, Output} ->
-          send_complete(Caller, Output);
-        {error, Reason} ->
-          ?LOGERROR("failed to execute script on port: ~p, caller: ~p, reason: ~p", [
+          send_ok(Caller, CallRef, Output);
+        {error, Error} ->
+          ?LOGERROR("failed to execute script on port: ~p, caller: ~p, error: ~p", [
             Port,
             Caller,
-            Reason
+            Error
           ]),
-          send_error(Caller, Reason)
+          send_error(Caller, CallRef, Error)
       end,
       erl_py_runner_pool:send_worker_ready(self()),
       loop(State);
@@ -142,35 +150,44 @@ loop(#state{port = Port} = State) ->
       ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
       exit({port_exit, {status_code, StatusCode}});
     {'EXIT', From, Reason} ->
-      ?LOGERROR("received exit from: ~p, reason: ~p", [From, Reason]),
+      ?LOGERROR("received exit from linked: ~p, reason: ~p", [From, Reason]),
       erlang:port_close(Port),
       exit(Reason);
     Unexpected ->
       ?LOGWARNING("received unexpected message: ~p, ignored", [Unexpected]),
       loop(State)
   end.
-  
-send_data(
+ 
+send_run_command(
   Code,
   Arguments,
-  #state{port = Port} = State
+  #state{
+    port = Port,
+    timeout = Timeout
+  } = State
 ) ->
-  case send_command(Port, {exec, Code, Arguments}) of
-    ok -> wait_data(State);
-    error -> {error, aborted}
-  end;
-send_data(_Code, _Arguments, _State) ->
-  {error, invalid_inputs}.
-
-wait_data(#state{port = Port, timeout = Timeout} = State) ->
+  Deadline = erlang:monotonic_time(millisecond) + Timeout,
+  try_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments)),
+  wait_data(State, Deadline).
+  
+wait_data(
+  #state{port = Port} = State,
+  Deadline
+) ->
+  Remaining = Deadline - erlang:monotonic_time(millisecond),
+  Timeout = max(0, Remaining),
   receive
-    {Port, {data, Data}} ->
-      case erlang:binary_to_term(Data) of
+    {Port, {data, Binary}} ->
+      Term =
+        try erlang:binary_to_term(Binary)
+        catch _:_ -> {error, invalid_term_received}
+        end,
+      case Term of
         {ok, Response} ->
           {ok, Response};
         {call, RequestID, Module, Function, Arguments} ->
-          handle_call(State, RequestID, Module, Function, Arguments),
-          wait_data(State);
+          handle_call(RequestID, Module, Function, Arguments, State),
+          wait_data(State, Deadline);
         {error, Error} ->
           {error, Error}
       end;
@@ -189,51 +206,58 @@ wait_data(#state{port = Port, timeout = Timeout} = State) ->
 %%% +--------------------------------------------------------------+
 
 handle_call(
-  #state{
-    port = Port,
-    allowed_modules = AllowedModules
-  },
   RequestID,
   Module,
   Function,
-  Arguments
+  Arguments,
+  #state{
+    port = Port,
+    allowed_modules = AllowedModules
+  }
 ) ->
   Response =
     try
-      % TODO: Check if module & function exists
-      check_module(Module, AllowedModules),
-      {call_reply, RequestID, {ok, erlang:apply(Module, Function, Arguments)}}
+      is_module_allowed(Module, AllowedModules),
+      is_function_available(Module, Function, Arguments),
+      ?COMMAND_REPLY(RequestID, {ok, erlang:apply(Module, Function, Arguments)})
     catch
-      throw:{ErrorType, ErrorMessage}
-        when ErrorType =:= not_found orelse ErrorType =:= not_allowed ->
-        {call_reply, RequestID, {error, ErrorMessage}};
+      throw:module_not_allowed ->
+        ?COMMAND_REPLY(RequestID, {error, <<"module is not allowed">>});
+      throw:function_not_found ->
+        ?COMMAND_REPLY(RequestID, {error, <<"function is not found">>});
+      throw:function_arguments_not_list ->
+        ?COMMAND_REPLY(RequestID, {error, <<"function arguments is not list type">>});
       _Class:Error ->
-        {call_reply, RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))}}
+        ?COMMAND_REPLY(RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))})
     end,
-  send_command(Port, Response).
+  try_port_command(Port, Response).
 
-new_worker_id(Number) ->
-  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Number)).
-  
-send_complete(PID, Output) ->
-  PID ! {complete, self(), Output}.
-  
-send_error(PID, Error) ->
-  PID ! {error, self(), Error}.
-
-send_command(Port, Data) ->
-  case erlang:port_command(Port, erlang:term_to_binary(Data), [nosuspend]) of
-    true -> ok;
-    false -> exit(port_command)
+try_port_command(Port, Term) ->
+  case erlang:port_command(Port, erlang:term_to_binary(Term), [nosuspend]) of
+    true ->
+      ok;
+    false ->
+      erlang:port_close(Port),
+      exit(port_command_aborted)
   end.
 
-check_module(_Module, all) ->
+is_module_allowed(_Module, all) ->
   ok;
-check_module(Module, AllowedModules) ->
+is_module_allowed(Module, AllowedModules) ->
   case AllowedModules of
     #{Module := true} ->
       ok;
     _Other ->
-      ErrorMessage = iolist_to_binary(io_lib:format("module ~ts is not allowed", [Module])),
-      throw({not_allowed, ErrorMessage})
+      throw(module_not_allowed)
   end.
+  
+is_function_available(Module, Function, Arguments) when is_list(Arguments) ->
+  code:ensure_loaded(Module),
+  case erlang:function_exported(Module, Function, length(Arguments)) of
+    true ->
+      ok;
+    false ->
+      throw(function_not_found)
+  end;
+is_function_available(_Module, _Function, _Arguments) ->
+  throw(function_arguments_not_list).
