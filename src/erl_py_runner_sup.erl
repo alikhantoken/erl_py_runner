@@ -26,11 +26,10 @@ start_link() ->
   
 init([]) ->
   {ok, #{
-    intensity := Intensity,
-    period := Period
-  }} = ?ENV(supervisor),
-
-  {ok, #{
+    supervisor := #{
+      intensity := Intensity,
+      period := Period
+    },
     config := #{
       max_pending := MaxPending,
       pool_size := PoolSize,
@@ -49,8 +48,8 @@ init([]) ->
   
   Supervisor = #{
     strategy => one_for_all,
-    intensity => Intensity,
-    period => Period
+    intensity => ?SUP_DEFAULT_INTENSITY,
+    period => ?SUP_DEFAULT_PERIOD
   },
   
   WorkerConfig = #{
@@ -63,7 +62,7 @@ init([]) ->
   Children = [
     #{
       id => erl_py_runner_worker_sup,
-      start => {erl_py_runner_worker_sup, start_link, []},
+      start => {erl_py_runner_worker_sup, start_link, [Intensity * PoolSize, Period]},
       restart => permanent,
       shutdown => infinity,
       type => supervisor
@@ -72,7 +71,7 @@ init([]) ->
       id => erl_py_runner_pool,
       start => {erl_py_runner_pool, start_link, [PoolSize, MaxPending, WorkerConfig]},
       restart => permanent,
-      shutdown => 5000,
+      shutdown => ?WORKER_DEFAULT_POOL_SHUTDOWN,
       type => worker
     }
   ],

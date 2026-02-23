@@ -12,7 +12,7 @@
 %%% +--------------------------------------------------------------+
 
 -export([
-  start_link/0,
+  start_link/2,
   init/1
 ]).
 
@@ -20,13 +20,13 @@
 %%% |                         Implementation                       |
 %%% +--------------------------------------------------------------+
 
-start_link() ->
-  supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+start_link(Intensity, Period) ->
+  supervisor:start_link({local, ?MODULE}, ?MODULE, [Intensity, Period]).
 
-init([]) ->
+init([Intensity, Period]) ->
   Supervisor = #{
     strategy => one_for_one,
-    intensity => ?DEFAULT_SUP_INTENSITY,
-    period => ?DEFAULT_SUP_PERIOD
+    intensity => Intensity,
+    period => Period
   },
   {ok, {Supervisor, []}}.

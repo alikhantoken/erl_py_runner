@@ -6,6 +6,14 @@
 -ifndef(ERL_PY_RUNNER).
 -define(ERL_PY_RUNNER, 1).
 
+-define(APP_NAME, erl_py_runner).
+
+-define(WORKER_DEFAULT_POOL_SHUTDOWN, 10000).
+-define(WORKER_DEFAULT_SUP_INTENSITY, 5).
+-define(WORKER_DEFAULT_SUP_PERIOD, 60).
+-define(SUP_DEFAULT_INTENSITY, 10).
+-define(SUP_DEFAULT_PERIOD, 60).
+
 -define(MFA_METADATA, #{
   mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY},
   line => ?LINE
@@ -25,10 +33,5 @@
 
 -define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
 -define(PYTHON_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "python3"])).
-
--define(DEFAULT_SUP_INTENSITY, 5).
--define(DEFAULT_SUP_PERIOD, 30).
-
--define(APP_NAME, erl_py_runner).
 
 -endif.
