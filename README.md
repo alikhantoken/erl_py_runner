@@ -22,76 +22,123 @@ cd erl_py_runner
 ```
 
 ## Configuration
-All settings go under the `erl_py_runner` application env in `sys.config`.
+All settings go under the `erl_py_runner` application env in `sys.config`. The configuration is split into two groups: `environment` and `worker`.
+
+```erlang
+[
+  {erl_py_runner, [
+    {environment, #{
+      requirements => "python/requirements.txt",
+      runner => "python/runner.py",
+      venv_dir => ".venv"
+    }},
+    {worker, #{
+      supervisor => #{
+        intensity => 5,
+        period => 30
+      },
+      config => #{
+        timeout => 60000,
+        pool_size => 3,
+        max_pending => infinity
+      },
+      modules_whitelist => #{
+        erlang_modules => [math, lists, maps, binary, string],
+        python_modules => [<<"math">>, <<"re">>, <<"datetime">>, <<"json">>]
+      }
+    }}
+  ]}
+].
+```
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `environment.venv_dir` | Path to the Python virtual environment (relative to `priv/`) | `".venv"` |
+| `environment.runner` | Path to the Python runner script (relative to `priv/`) | `"python/runner.py"` |
+| `environment.requirements` | Path to `requirements.txt` (relative to `priv/`) | `"python/requirements.txt"` |
+| `worker.config.pool_size` | Number of Python worker processes | `3` |
+| `worker.config.timeout` | Default execution timeout in milliseconds | `60000` |
+| `worker.config.max_pending` | Max queued requests when all workers are busy | `infinity` |
+| `worker.modules_whitelist.erlang_modules` | Erlang modules callable from Python (`all` to allow any) | `[math, lists, maps, binary, string]` |
+| `worker.modules_whitelist.python_modules` | Python modules importable in scripts (`all` to allow any) | `[<<"math">>, <<"re">>, <<"datetime">>, <<"json">>]` |
+
+Any key omitted from the user config falls back to its default value.
 
 ## Usage
 ### Running Python Code
 ```erlang
-%% Basic script execution call without timeout
-{ok, Response} = erl_py_runner:run(#{
-  code => <<"result = arguments['x'] + arguments['y']">>,
-  arguments => #{<<"x">> => 10, <<"y">> => 20}
-}).
-%% Expected response: #{status => ok, result => 30}
+%% Basic execution with default timeout (60 seconds)
+{ok, Result} = erl_py_runner:run(
+  <<"result = arguments['x'] + arguments['y']">>,
+  #{<<"x">> => 10, <<"y">> => 20}
+).
+%% Result => 30
 
-%% Basic script execution call with explicit timeout
-{ok, Response} = erl_py_runner:run(#{
-  code => <<"result = arguments['x'] + arguments['y']">>,
-  arguments => #{<<"x">> => 10, <<"y">> => 20}
-}, 10000).
+%% Execution with explicit timeout (10 seconds)
+{ok, Result} = erl_py_runner:run(
+  <<"result = arguments['x'] + arguments['y']">>,
+  #{<<"x">> => 10, <<"y">> => 20},
+  10000
+).
 ```
 
-**Input** is a map with two keys:
-- `code` - binary string of `python` source code to execute.
-- `arguments` - any type of data that needs to be available inside the script as the `arguments` variable.
+**`erl_py_runner:run/2,3`**
+```erlang
+-spec run(Code :: binary(), Arguments :: term()) -> {ok, term()} | {error, term()}.
+-spec run(Code :: binary(), Arguments :: term(), Timeout :: timeout()) -> {ok, term()} | {error, term()}.
+```
+
+- `Code` - binary string of Python source code to execute.
+- `Arguments` - any Erlang term, available inside the script as the `arguments` variable.
+- `Timeout` - optional, defaults to `60000` ms.
 
 **Output**
 ```erlang
-{ok, #{status := ok, result := Result}}     %% Successful code execution
-{ok, #{status := error, error := Reason}}   %% Successful code execution, but with raised python exception
-{error, timeout}                            %% Code execution failed by timeout
-{error, Reason}                             %% Code execution failed by some other reasons
+{ok, Result}    %% Successful code execution, `Result` is the value of the `result` variable
+{error, Reason} %% Python exception, timeout or port failure
 ```
 
+**`erl_py_runner:restart/0`** - Stops and restarts the entire application (all workers, pool, and venv setup).
+
 ### Inside the Python Script
-Three variables are injected into the scope of python code execution:
-- **`arguments`** - the term sent from erlang.
+Three variables are injected into the execution scope:
+- **`arguments`** - the Erlang term sent as the second argument to `run/2,3`.
 - **`result`** - set this to the value you want returned (defaults to `None`).
-- **`erlang`** - object for calling erlang functions.
+- **`erlang`** - object for calling Erlang functions back synchronously.
 
 ```python
 import math
 result = math.sqrt(arguments['value'])
 ```
 
+Dangerous builtins (`eval`, `exec`, `open`, `compile`, `__import__`, `input`, `exit`, `quit`, `breakpoint`) are removed from the execution scope. Imports are restricted to the configured `python_modules` whitelist.
+
 ### Calling Erlang from Python
-Use the `erlang` object to call whitelisted erlang functions synchronously:
+Use the `erlang` object to call whitelisted Erlang functions synchronously:
 ```python
-value = erlang.call("my_module", "my_function", AnyErlangCompatibleTerm)
+value = erlang.call("module", "function", [arg1, arg2, ...])
 ```
 
-The Erlang side invokes `Module:Function(Args)` where `Args` is a variable received from Python call request. It may 
-raise `ErlangError`, `ErlangTimeoutError`, `ErlangPortError`.
+The third argument is a **list of arguments** passed to `erlang:apply(Module, Function, Arguments)`. It may raise `ErlangError`, `ErlangTimeoutError`, or `ErlangPortError`.
 
 ```erlang
-%% Example: Python calling lists:sort/1
-{ok, Response} = erl_py_runner:run(#{
-  code => <<"result = erlang.call('lists', 'sort', [9, 1, 5])">>,
-  arguments => #{}
-}).
+%% Python calling lists:sort/1
+{ok, Result} = erl_py_runner:run(
+  <<"result = erlang.call('lists', 'sort', [[9, 1, 5]])">>,
+  #{}
+).
+%% Result => [1, 5, 9]
 ```
 
 ## How It Works
-1. On startup, a Python virtual environment is created and dependencies are installed automatically. If any other
-dependencies are required, they can be added to `requirements.txt`.
-2. A pool of `pool_size` python processes are spawned, each connected to an erlang worker via a port through `stdin` & 
-`stdout`.
-3. Calling `erl_py_runner:run/1,2` dispatches the request to an idle worker. If all are busy, the caller blocks until one frees up or the timeout expires.
+1. On startup, a Python virtual environment is created at `priv/.venv` and dependencies are installed automatically (via `priv/install.sh`). Additional pip packages can be added to `priv/python/requirements.txt`.
+2. A pool of `pool_size` Python processes are spawned, each connected to an Erlang worker via a port through `stdin` & `stdout`.
+3. Calling `erl_py_runner:run/2,3` dispatches the request to an idle worker. If all are busy, the caller blocks until one frees up or the timeout expires.
 4. The worker sends code & arguments to Python, which executes it in `exec()` and returns the result.
-5. During execution, python can use erlang functions by initiating call requests back synchronously to erlang port.
+5. During execution, Python can call Erlang functions by sending call requests back synchronously through the port.
 
 ## Message Protocol
-Workers and Python processes communicate via **4-byte big-endian length-prefixed ETF** messages over stdin & stdout. Conversion between erlang terms and python terms is achieved via https://github.com/Pyrlang/Term.
+Workers and Python processes communicate via **4-byte big-endian length-prefixed ETF** messages over stdin & stdout. Conversion between Erlang terms and Python terms is achieved via https://github.com/Pyrlang/Term.
 
 ```
 ┌──────────────────┬─────────────────────┐
@@ -103,14 +150,17 @@ Max message size: **10 MB**.
 
 ### Message Types
 
-| Direction        | Type                           | Format |
-|------------------|--------------------------------|---|
-| Erlang to Python | Initialization                 | `#{type => init, allowed_modules => [...]}` |
-| Python to  Erlang  | Initialization acknowledgement | `#{status => ok}` |
-| Erlang to  Python  | Code Execution                 | `#{code => Code, arguments => Args}` |
-| Python to  Erlang  | Code Result                    | `#{status => ok, result => Value}` or `#{status => error, error => Reason}` |
-| Python to  Erlang  | Call Request                   | `#{type => call_request, request_id => Id, module => M, function => F, args => A}` |
-| Erlang to  Python  | Call Response                  | `#{type => call_response, request_id => Id, status => ok/error, result/error => ...}` |
+All messages are **ETF-encoded tuples**.
+
+| Direction | Type | Format |
+|-----------|------|--------|
+| Erlang → Python | Initialization | `{init, AllowedPythonModules}` |
+| Python → Erlang | Init acknowledgement | `ok` |
+| Erlang → Python | Code Execution | `{exec, Code, Arguments}` |
+| Python → Erlang | Success Result | `{ok, Result}` |
+| Python → Erlang | Error Result | `{error, ErrorString}` |
+| Python → Erlang | Call Request | `{call, RequestID, Module, Function, Arguments}` |
+| Erlang → Python | Call Response | `{call_reply, RequestID, {ok, Result} \| {error, Error}}` |
 
 ## License
 
