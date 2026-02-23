@@ -24,9 +24,11 @@
 -define(ENV(Key@), application:get_env(erl_py_runner, Key@)).
 
 -define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
--define(PYTHON_PATH(VenvDirectory@, Python@), filename:join([VenvDirectory@, "bin", Python@])).
+-define(PYTHON_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "python3"])).
 
 -define(DEFAULT_SUP_INTENSITY, 5).
 -define(DEFAULT_SUP_PERIOD, 30).
+
+-define(APP_NAME, erl_py_runner).
 
 -endif.

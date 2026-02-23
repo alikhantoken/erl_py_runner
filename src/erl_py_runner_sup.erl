@@ -31,11 +31,6 @@ init([]) ->
   }} = ?ENV(supervisor),
 
   {ok, #{
-    environment := #{
-      python := Python,
-      runner := Runner,
-      venv_dir := VenvDirectory
-    },
     config := #{
       max_pending := MaxPending,
       pool_size := PoolSize,
@@ -47,6 +42,11 @@ init([]) ->
     }
   }} = ?ENV(worker),
   
+  {ok, #{
+    runner := Runner,
+    venv_dir := VenvDirectory
+  }} = ?ENV(environment),
+  
   Supervisor = #{
     strategy => one_for_all,
     intensity => Intensity,
@@ -54,7 +54,7 @@ init([]) ->
   },
   
   WorkerConfig = #{
-    runner => ?PYTHON_PATH(VenvDirectory, Python) ++ " -u " ++ Runner,
+    runner => ?PYTHON_PATH(VenvDirectory) ++ " -u " ++ Runner,
     timeout => Timeout,
     python_modules => PythonModules,
     erlang_modules => ErlangModules

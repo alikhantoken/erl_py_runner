@@ -21,14 +21,10 @@
 %%% +--------------------------------------------------------------+
 
 start(_StartType, _StartArgs) ->
-  case ?ENV(worker) of
-    {ok, #{environment := Environment} = Config} ->
+  case ?ENV(environment) of
+    {ok, Environment} ->
       ResolvedEnvironment = resolve_environment(Environment),
-      application:set_env(
-        erl_py_runner,
-        worker,
-        Config#{environment => ResolvedEnvironment}
-      ),
+      application:set_env(?APP_NAME, environment, ResolvedEnvironment),
       case erl_py_runner_env:ensure(ResolvedEnvironment) of
         ok ->
           erl_py_runner_sup:start_link();
@@ -51,11 +47,10 @@ resolve_environment(#{
   requirements := Requirements,
   venv_dir := VenvDir
 } = Env) ->
-  RootPath = code:priv_dir(erl_py_runner),
   Env#{
-    runner := resolve_path(RootPath, Runner),
-    requirements := resolve_path(RootPath, Requirements),
-    venv_dir := resolve_path(RootPath, VenvDir)
+    runner := resolve_path(code:priv_dir(?APP_NAME), Runner),
+    requirements := resolve_path(code:priv_dir(?APP_NAME), Requirements),
+    venv_dir := resolve_path(code:priv_dir(?APP_NAME), VenvDir)
   }.
 
 resolve_path(RootPath, Path) ->

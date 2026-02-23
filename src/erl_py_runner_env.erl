@@ -17,59 +17,39 @@
 %%% +--------------------------------------------------------------+
 
 ensure(#{
-  python := Python,
-  pyterm := Pyterm,
   venv_dir := VenvDirectory,
   requirements := Requirements
 }) ->
-  case ensure_venv(VenvDirectory, Python) of
-    ok ->
-      install_deps(VenvDirectory, Requirements, Pyterm);
-    {error, Error} ->
-      {error, Error}
-  end.
-
+  Script = filename:join(code:priv_dir(?APP_NAME), "install.sh"),
+  run_command(Script, [VenvDirectory, Requirements]).
+  
 %%% +--------------------------------------------------------------+
 %%% |                       Internal functions                     |
 %%% +--------------------------------------------------------------+
 
-ensure_venv(VenvDirectory, Python) ->
-  case filelib:is_dir(VenvDirectory) of
-    true ->
-      ?LOGINFO("venv already exists, path: ~p", [VenvDirectory]),
-      ok;
-    false ->
-      ?LOGINFO("creating venv: ~ts, python: ~p", [VenvDirectory, Python]),
-      run_command(Python ++ " -m venv " ++ VenvDirectory)
-  end.
-
-install_deps(VenvDirectory, Requirements, Pyterm) ->
-  run_command(?PIP_PATH(VenvDirectory) ++ " install --upgrade pip setuptools wheel"),
-  run_command(?PIP_PATH(VenvDirectory) ++ " install " ++ Pyterm),
-  case filelib:is_file(Requirements) of
-    false ->
-      ?LOGWARNING("requirements file ~s not found, skipping", [Requirements]);
-    true ->
-      ?LOGINFO("installing python requirements from: ~s", [Requirements]),
-      run_command(?PIP_PATH(VenvDirectory) ++ " install -r " ++ Requirements)
-  end.
-
-run_command(Command) ->
+run_command(Script, Args) ->
   Port =
     open_port(
-      {spawn, Command},
-      [exit_status, stderr_to_stdout, binary, {line, 1024}]
+      {spawn_executable, Script},
+      [
+        {args, Args},
+        exit_status,
+        stderr_to_stdout,
+        binary,
+        {line, 1024}
+      ]
     ),
   collect_port_output(Port).
 
 collect_port_output(Port) ->
+  collect_port_output(Port, <<>>).
+collect_port_output(Port, Acc) ->
   receive
-    {Port, {data, {eol, Line}}} ->
-      ?LOGINFO("~ts", [Line]),
-      collect_port_output(Port);
     {Port, {data, {noeol, Line}}} ->
-      ?LOGINFO("~ts", [Line]),
-      collect_port_output(Port);
+      collect_port_output(Port, <<Acc/binary, Line/binary>>);
+    {Port, {data, {eol, Line}}} ->
+      ?LOGINFO("~ts", [<<Acc/binary, Line/binary>>]),
+      collect_port_output(Port, <<>>);
     {Port, {exit_status, 0}} ->
       ok;
     {Port, {exit_status, Code}} ->
