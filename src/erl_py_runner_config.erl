@@ -23,7 +23,7 @@ verify(Config) ->
     maps:fold(
       fun(ConfigGroup, DefaultConfig, Acc) ->
         UserConfig = maps:get(ConfigGroup, Config, #{}),
-        MergeConfig = maps:merge(DefaultConfig, UserConfig),
+        MergeConfig = deep_merge(DefaultConfig, UserConfig),
         ok = application:set_env(?APP_NAME, ConfigGroup, MergeConfig),
         maps:merge(Acc, #{ConfigGroup => MergeConfig})
       end,
@@ -57,20 +57,21 @@ default() ->
         pool_size => 3,
         max_pending => infinity
       },
-      erlang_modules => [
-        math,
-        lists,
-        maps,
-        binary,
-        string,
-        json
-      ],
-      python_modules => [
-        <<"math">>,
-        <<"re">>,
-        <<"datetime">>,
-        <<"json">>
-      ]
+      modules_whitelist => #{
+        erlang_modules => [
+          math,
+          lists,
+          maps,
+          binary,
+          string
+        ],
+        python_modules => [
+          <<"math">>,
+          <<"re">>,
+          <<"datetime">>,
+          <<"json">>
+        ]
+      }
     }
   }.
   
@@ -113,6 +114,22 @@ collect_port_output(Port, Acc) ->
     {Port, {exit_status, Code}} ->
       {error, {exit_code, Code}}
   end.
+  
+deep_merge(Default, Override) when is_map(Default), is_map(Override) ->
+  maps:fold(
+    fun(Key, OverrideValue, Acc) ->
+      case Acc of
+        #{Key := DefaultValue} when is_map(DefaultValue), is_map(OverrideValue) ->
+          Acc#{Key => deep_merge(DefaultValue, OverrideValue)};
+        _ ->
+          Acc#{Key => OverrideValue}
+      end
+    end,
+    Default,
+    Override
+  );
+deep_merge(_Default, Override) ->
+  Override.
   
 resolve_environment(#{
   runner := Runner,
