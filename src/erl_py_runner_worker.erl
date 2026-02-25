@@ -285,8 +285,6 @@ collect_port_info(Port) ->
     input,
     output,
     memory,
-    monitors,
-    monitored_by,
     os_pid,
     queue_size
   ],
