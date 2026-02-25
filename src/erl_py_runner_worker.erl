@@ -15,7 +15,8 @@
 -export([
   start_child/2,
   start/1,
-  run/2, run/3
+  run/2, run/3,
+  info/1
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -50,6 +51,17 @@ run(Code, Arguments) ->
 run(Code, Arguments, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
   do_run(Worker, Code, Arguments, Timeout).
+  
+info(Worker) ->
+  MonitorRef = erlang:monitor(process, Worker),
+  Worker ! {info, self()},
+  receive
+    {ok, Info} ->
+      erlang:demonitor(MonitorRef, [flush]),
+      Info;
+    {'DOWN', MonitorRef, process, Worker, Reason} ->
+      {error, Worker, Reason}
+  end.
 
 %%% +--------------------------------------------------------------+
 %%% |                       Internal functions                     |
@@ -145,6 +157,10 @@ loop(#state{port = Port} = State) ->
           send_error(Caller, CallRef, Error)
       end,
       erl_py_runner_pool:send_worker_ready(self()),
+      loop(State);
+    {info, Caller} ->
+      Info = collect_port_info(Port),
+      Caller ! {ok, Info},
       loop(State);
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
@@ -261,3 +277,25 @@ is_function_available(Module, Function, Arguments) when is_list(Arguments) ->
   end;
 is_function_available(_Module, _Function, _Arguments) ->
   throw(function_arguments_not_list).
+  
+collect_port_info(Port) ->
+  Keys = [
+    connected,
+    id,
+    input,
+    output,
+    memory,
+    monitors,
+    monitored_by,
+    os_pid,
+    queue_size
+  ],
+  lists:foldl(
+    fun(Key, Acc) ->
+      {Key, Value} = erlang:port_info(Port, Key),
+      Acc#{Key => Value}
+    end,
+    #{},
+    Keys
+  ).
+  

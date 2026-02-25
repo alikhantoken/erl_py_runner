@@ -11,7 +11,8 @@
 
 -export([
   run/2, run/3,
-  restart/0
+  restart/0,
+  info/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -29,3 +30,7 @@ run(Code, Arguments, Timeout) ->
 -spec restart() -> ok | {error, term()}.
 restart() ->
   erl_py_runner_app:restart().
+  
+-spec info() -> list(map()).
+info() ->
+  erl_py_runner_worker_sup:info().

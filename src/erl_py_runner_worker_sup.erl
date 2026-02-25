@@ -13,7 +13,8 @@
 
 -export([
   start_link/2,
-  init/1
+  init/1,
+  info/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -30,3 +31,6 @@ init([Intensity, Period]) ->
     period => Period
   },
   {ok, {Supervisor, []}}.
+
+info() ->
+  [erl_py_runner_worker:info(PID) || {_, PID, _, _} <- supervisor:which_children(?MODULE)].
