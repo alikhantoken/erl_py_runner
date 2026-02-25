@@ -33,11 +33,19 @@
 ]).
 
 %%% +--------------------------------------------------------------+
-%%% |                        API Interface                         |
+%%% |                         Public API                           |
 %%% +--------------------------------------------------------------+
 
+%% Called by any process that wants to run a script.
+%%   Non-Blocking: Tries to acquire a worker right away through ETS for idle workers.
+%%   Blocking: Otherwise, it calls the gen_server and waits until one is free.
 get_worker(Timeout) ->
-  gen_server:call(?MODULE, ?GET_WORKER, Timeout).
+  case pop_idle() of
+    {ok, Worker} ->
+      {ok, Worker};
+    empty ->
+      gen_server:call(?MODULE, ?GET_WORKER, Timeout)
+  end.
 
 send_worker_start(PID) ->
   ?MODULE ! {?WORKER_START, PID}.
@@ -53,69 +61,147 @@ start_link(PoolSize, MaxPending, WorkerConfig) ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [PoolSize, MaxPending, WorkerConfig], []).
 
 init([PoolSize, MaxPending, WorkerConfig]) ->
+  ets:new(?IDLE_WORKERS_TAB, [
+    named_table,
+    public,
+    set,
+    {read_concurrency, true}
+  ]),
   [erl_py_runner_worker:start_child(Number, WorkerConfig) || Number <- lists:seq(1, PoolSize)],
-  Pool =
-    #pool{
-      idle = queue:new(),
-      pending = queue:new(),
-      max_pending = MaxPending
-    },
-  {ok, Pool}.
-
+  {ok, #pool{
+    max_pending = MaxPending,
+    worker_monitors = #{},
+    caller_monitors = #{},
+    pending = queue:new(),
+    pending_size = 0
+  }}.
+  
+%% Blocking operation: the caller couldn't get a worker from ETS.
+%% Check ETS again (a worker might have returned after the caller checked).
+%% If still none, either put the caller in the queue or reject the request.
 handle_call(
   ?GET_WORKER,
   Caller,
   #pool{
-    idle = Idle,
-    pending = Pending,
-    max_pending = MaxPending
+    pending = PendingQueue,
+    pending_size = Size,
+    max_pending = Max,
+    caller_monitors = CalledMonitors
   } = Pool
 ) ->
-  case queue:out(Idle) of
-    {{value, Worker}, RestIdle} ->
-      {reply, Worker, Pool#pool{idle = RestIdle}};
-    {empty, _} ->
-      case queue:len(Pending) >= MaxPending andalso MaxPending =/= infinity of
+  case pop_idle() of
+    {ok, WorkerPID} ->
+      {reply, {ok, WorkerPID}, Pool};
+    empty ->
+      case Max =/= infinity andalso Size >= Max of
         true ->
           {reply, {error, overloaded}, Pool};
         false ->
-          {noreply, Pool#pool{pending = queue:in(Caller, Pending)}}
+          {CallerPID, _Tag} = Caller,
+          MonRef = erlang:monitor(process, CallerPID),
+          {noreply, Pool#pool{
+            pending = queue:in({Caller, MonRef}, PendingQueue),
+            pending_size = Size + 1,
+            caller_monitors = CalledMonitors#{MonRef => true}
+          }}
       end
   end;
-handle_call(UnexpectedMessage, _From, Pool) ->
-  ?LOGWARNING("received unexpected message: ~p", [UnexpectedMessage]),
+
+handle_call(Unexpected, _From, Pool) ->
+  ?LOGWARNING("pool received unexpected call: ~p", [Unexpected]),
   {reply, {error, unexpected_message}, Pool}.
 
-handle_info({?WORKER_START, PID}, Pool) ->
-  erlang:monitor(process, PID),
-  UpdatePool = dispatch(PID, Pool),
-  {noreply, UpdatePool};
-handle_info({?WORKER_READY, PID}, Pool) ->
-  UpdatePool = dispatch(PID, Pool),
-  {noreply, UpdatePool};
-handle_info({'DOWN', _, process, DeadPID, _Reason}, #pool{idle = Idle} = Pool) ->
-  {noreply, Pool#pool{idle = queue:filter(fun(PID) -> PID =/= DeadPID end, Idle)}};
-handle_info(UnexpectedMessage, Pool) ->
-  ?LOGWARNING("received unexpected message: ~p", [UnexpectedMessage]),
+handle_info(
+  {?WORKER_START, PID},
+  #pool{worker_monitors = WorkerMonitors} = Pool
+) ->
+  MonRef = erlang:monitor(process, PID),
+  NewPool = Pool#pool{worker_monitors = WorkerMonitors#{MonRef => PID}},
+  {noreply, dispatch(PID, NewPool)};
+
+handle_info(
+  {?WORKER_READY, PID},
+  Pool
+) ->
+  {noreply, dispatch(PID, Pool)};
+
+handle_info(
+  {'DOWN', MonRef, process, DeadPID, Reason},
+  #pool{worker_monitors = WorkerMonitors, caller_monitors = CallerMonitors} = Pool
+) ->
+  NewPool =
+    case maps:take(MonRef, WorkerMonitors) of
+      % A worker died, remove from idle ETS.
+      {_PID, NewWorkerMonitors} ->
+        ?LOGWARNING("received down from worker: ~p, reason: ~p", [DeadPID, Reason]),
+        ets:delete(?IDLE_WORKERS_TAB, DeadPID),
+        Pool#pool{worker_monitors = NewWorkerMonitors};
+      % A caller died, remove from the pending queue.
+      error ->
+        case CallerMonitors of
+          #{MonRef := true} ->
+            Filtered =
+              [Element || {_Caller, Ref} = Element <- queue:to_list(Pool#pool.pending), Ref =/= MonRef],
+            Pool#pool{
+              pending = queue:from_list(Filtered),
+              pending_size = Pool#pool.pending_size - 1,
+              caller_monitors = maps:remove(MonRef, CallerMonitors)
+            };
+          _Unexpected ->
+            ?LOGWARNING("pool received DOWN for unknown monitor: ~p, pid: ~p", [MonRef, DeadPID]),
+            Pool
+        end
+    end,
+  {noreply, NewPool};
+
+handle_info(Unexpected, Pool) ->
+  ?LOGWARNING("pool received unexpected info: ~p", [Unexpected]),
   {noreply, Pool}.
 
-handle_cast(UnexpectedMessage, Pool) ->
-  ?LOGWARNING("received unexpected message: ~p", [UnexpectedMessage]),
+handle_cast(Unexpected, Pool) ->
+  ?LOGWARNING("pool received unexpected cast: ~p", [Unexpected]),
   {noreply, Pool}.
 
 terminate(Reason, _Pool) ->
-  ?LOGINFO("terminating w/ reason: ~p", [Reason]),
+  ?LOGINFO("pool terminating, reason: ~p", [Reason]),
   ok.
 
 %%% +--------------------------------------------------------------+
-%%% |                       Internal functions                     |
+%%% |                      Internal Functions                      |
 %%% +--------------------------------------------------------------+
 
-dispatch(PID, #pool{pending = Pending, idle = Idle} = Pool) ->
-  case queue:out(Pending) of
-    {{value, Caller}, RestPending} ->
-      gen_server:reply(Caller, PID),
-      Pool#pool{pending = RestPending};
+pop_idle() ->
+  case ets:first(?IDLE_WORKERS_TAB) of
+    '$end_of_table' ->
+      empty;
+    PID ->
+      case ets:take(?IDLE_WORKERS_TAB, PID) of
+        [{PID}] ->
+          {ok, PID};
+        [] ->
+          pop_idle()
+      end
+  end.
+
+%% Give the worker to the oldest waiting caller, or store it as idle in ETS.
+dispatch(
+  PID,
+  #pool{
+    pending = PendingQueue,
+    pending_size = Size,
+    caller_monitors = CallerMonitors
+  } = Pool
+) ->
+  case queue:out(PendingQueue) of
+    {{value, {Caller, MonRef}}, RestPendingQueue} ->
+      erlang:demonitor(MonRef, [flush]),
+      gen_server:reply(Caller, {ok, PID}),
+      Pool#pool{
+        pending = RestPendingQueue,
+        pending_size = Size - 1,
+        caller_monitors = maps:remove(MonRef, CallerMonitors)
+      };
     {empty, _} ->
-      Pool#pool{idle = queue:in(PID, Idle)}
+      ets:insert(?IDLE_WORKERS_TAB, {PID}),
+      Pool
   end.

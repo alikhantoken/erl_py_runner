@@ -6,14 +6,18 @@
 -ifndef(ERL_PY_RUNNER_POOL).
 -define(ERL_PY_RUNNER_POOL, 1).
 
--define(GET_WORKER, get_worker).
+-define(GET_WORKER,   get_worker).
 -define(WORKER_START, worker_started).
 -define(WORKER_READY, worker_ready).
 
+-define(IDLE_WORKERS_TAB, erl_py_runner_pool_idle).
+
 -record(pool, {
-  idle,
+  max_pending,
   pending,
-  max_pending
+  pending_size,
+  worker_monitors,
+  caller_monitors
 }).
 
 -endif.

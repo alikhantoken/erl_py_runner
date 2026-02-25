@@ -48,7 +48,7 @@ start(Config) ->
 run(Code, Arguments) ->
   run(Code, Arguments, _DefaultTimeout = 60000).
 run(Code, Arguments, Timeout) ->
-  Worker = erl_py_runner_pool:get_worker(Timeout),
+  {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
   do_run(Worker, Code, Arguments, Timeout).
 
 %%% +--------------------------------------------------------------+
