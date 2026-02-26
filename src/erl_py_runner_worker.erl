@@ -4,6 +4,7 @@
 %%% +--------------------------------------------------------------+
 
 -module(erl_py_runner_worker).
+-behaviour(gen_server).
 
 -include("erl_py_runner.hrl").
 -include("erl_py_runner_worker.hrl").
@@ -14,86 +15,54 @@
 
 -export([
   start_child/2,
-  start/1,
+  start_link/1,
   run/2, run/3,
   info/1
 ]).
 
 %%% +--------------------------------------------------------------+
-%%% |                         Implementation                       |
+%%% |                     Gen Server Callbacks                     |
+%%% +--------------------------------------------------------------+
+
+-export([
+  init/1,
+  handle_call/3,
+  handle_info/2,
+  handle_cast/2,
+  terminate/2
+]).
+
+%%% +--------------------------------------------------------------+
+%%% |                          Public API                          |
 %%% +--------------------------------------------------------------+
 
 start_child(Number, Config) ->
   {ok, PID} =
     supervisor:start_child(erl_py_runner_worker_sup, #{
-      id => new_worker_id(Number),
-      start => {erl_py_runner_worker, start, [Config]},
+      id => worker_id(Number),
+      start => {?MODULE, start_link, [Config]},
       restart => permanent,
       shutdown => 60000,
       type => worker
     }),
   PID.
-  
-start(Config) ->
-  PID =
-    spawn_link(
-      fun() ->
-        % We need this flag to be able to close the port before process shutdown.
-        process_flag(trap_exit, true),
-        State = init(Config),
-        erl_py_runner_pool:send_worker_start(self()),
-        loop(State)
-      end),
-  {ok, PID}.
+
+start_link(Config) ->
+  gen_server:start_link(?MODULE, Config, []).
 
 run(Code, Arguments) ->
   run(Code, Arguments, _DefaultTimeout = 60000).
+
 run(Code, Arguments, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
-  do_run(Worker, Code, Arguments, Timeout).
-  
+  gen_server:call(Worker, ?CALL_RUN(Code, Arguments), Timeout).
+
 info(Worker) ->
-  MonitorRef = erlang:monitor(process, Worker),
-  Worker ! {info, self()},
-  receive
-    {ok, Info} ->
-      erlang:demonitor(MonitorRef, [flush]),
-      Info;
-    {'DOWN', MonitorRef, process, Worker, Reason} ->
-      {error, Worker, Reason}
-  end.
+  gen_server:call(Worker, ?CALL_INFO, 5000).
 
 %%% +--------------------------------------------------------------+
-%%% |                       Internal functions                     |
+%%% |                     Gen Server Callbacks                     |
 %%% +--------------------------------------------------------------+
-
-new_worker_id(Number) ->
-  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Number)).
-  
-send_ok(Caller, CallRef, Output) ->
-  Caller ! {complete, CallRef, Output}.
-
-send_error(Caller, CallRef, Error) ->
-  Caller ! {error, CallRef, Error}.
-
-do_run(Worker, Code, Arguments, Timeout) ->
-  MonitorRef = erlang:monitor(process, Worker),
-  CallRef = erlang:make_ref(),
-  Worker ! {run, self(), CallRef, Code, Arguments},
-  receive
-    {complete, CallRef, Output} ->
-      erlang:demonitor(MonitorRef, [flush]),
-      {ok, Output};
-    {error, CallRef, Error} ->
-      erlang:demonitor(MonitorRef, [flush]),
-      {error, Error};
-    {'DOWN', MonitorRef, process, Worker, Reason} ->
-      {error, Reason}
-  after
-    Timeout ->
-      erlang:demonitor(MonitorRef, [flush]),
-      {error, timeout}
-  end.
 
 init(#{
   runner := Runner,
@@ -107,91 +76,88 @@ init(#{
       [{packet, 4}, binary, exit_status]
     ),
   handshake(Port, Timeout, AllowedPythonModules),
-  #state{
+  erl_py_runner_pool:send_worker_start(self()),
+  {ok, #data{
     port = Port,
     timeout = Timeout,
     allowed_modules =
       case AllowedErlangModules of
-        Modules when is_list(Modules) -> maps:from_keys(AllowedErlangModules, true);
+        Modules when is_list(Modules) -> maps:from_keys(Modules, true);
         all -> all;
         _Other -> #{}
       end
-  }.
+  }}.
+
+handle_call(
+  ?CALL_RUN(Code, Arguments),
+  _Caller,
+  #data{port = Port, timeout = Timeout} = Data
+) ->
+  Deadline = erlang:monotonic_time(millisecond) + Timeout,
+  send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments)),
+  Result = wait_port_response(Data, Deadline),
+  erl_py_runner_pool:send_worker_ready(self()),
+  {reply, Result, Data};
+
+handle_call(
+  ?CALL_INFO,
+  _Caller,
+  #data{port = Port} = Data
+) ->
+  {reply, collect_port_info(Port), Data}.
+
+handle_info(
+  {Port, {exit_status, StatusCode}},
+  #data{port = Port} = Data
+) ->
+  ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
+  {stop, {port_exit, StatusCode}, Data};
+
+handle_info(Unexpected, Data) ->
+  ?LOGWARNING("received unexpected message: ~p, ignored", [Unexpected]),
+  {noreply, Data}.
+  
+handle_cast(Unexpected, Pool) ->
+  ?LOGWARNING("pool received unexpected cast: ~p", [Unexpected]),
+  {noreply, Pool}.
+
+terminate(_Reason, #data{port = Port}) ->
+  catch erlang:port_close(Port),
+  ok.
+
+%%% +--------------------------------------------------------------+
+%%% |                       Internal Functions                     |
+%%% +--------------------------------------------------------------+
+
+worker_id(Number) ->
+  erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Number)).
 
 handshake(Port, Timeout, AllowedModules) ->
-  try_port_command(Port, ?COMMAND_INIT(AllowedModules)),
+  send_port_command(Port, ?COMMAND_INIT(AllowedModules)),
   receive
     {Port, {data, Response}} ->
       case erlang:binary_to_term(Response) of
         ok ->
           ok;
         {error, Error} ->
-          ?LOGERROR("received error from port during initialization: ~p, error: ~p", [
-            Port,
-            Error
-          ]),
-          erlang:port_close(Port),
+          ?LOGERROR("port init failed: ~p, error: ~p", [Port, Error]),
+          catch erlang:port_close(Port),
           exit({initialization_fail, Error})
       end;
     {Port, {exit_status, StatusCode}} ->
-      ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
+      ?LOGERROR("received port exit during init: ~p, status code: ~p", [Port, StatusCode]),
       exit({port_exit, {status_code, StatusCode}})
   after
     Timeout ->
-      erlang:port_close(Port),
+      catch erlang:port_close(Port),
       exit(initialization_timeout)
   end.
-  
-loop(#state{port = Port} = State) ->
-  receive
-    {run, Caller, CallRef, Code, Arguments} ->
-      case send_run_command(Code, Arguments, State) of
-        {ok, Output} ->
-          send_ok(Caller, CallRef, Output);
-        {error, Error} ->
-          ?LOGERROR("failed to execute script on port: ~p, caller: ~p, error: ~p", [
-            Port,
-            Caller,
-            Error
-          ]),
-          send_error(Caller, CallRef, Error)
-      end,
-      erl_py_runner_pool:send_worker_ready(self()),
-      loop(State);
-    {info, Caller} ->
-      Info = collect_port_info(Port),
-      Caller ! {ok, Info},
-      loop(State);
-    {Port, {exit_status, StatusCode}} ->
-      ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
-      exit({port_exit, {status_code, StatusCode}});
-    {'EXIT', From, Reason} ->
-      ?LOGERROR("received exit from linked: ~p, reason: ~p", [From, Reason]),
-      erlang:port_close(Port),
-      exit(Reason);
-    Unexpected ->
-      ?LOGWARNING("received unexpected message: ~p, ignored", [Unexpected]),
-      loop(State)
-  end.
- 
-send_run_command(
-  Code,
-  Arguments,
-  #state{
-    port = Port,
-    timeout = Timeout
-  } = State
-) ->
-  Deadline = erlang:monotonic_time(millisecond) + Timeout,
-  try_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments)),
-  wait_data(State, Deadline).
-  
-wait_data(
-  #state{port = Port} = State,
+
+wait_port_response(
+  #data{port = Port} = Data,
   Deadline
 ) ->
-  Remaining = Deadline - erlang:monotonic_time(millisecond),
-  Timeout = max(0, Remaining),
+  Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
   receive
     {Port, {data, Binary}} ->
       Term =
@@ -202,39 +168,32 @@ wait_data(
         {ok, Response} ->
           {ok, Response};
         {call, RequestID, Module, Function, Arguments} ->
-          handle_call(RequestID, Module, Function, Arguments, State),
-          wait_data(State, Deadline);
+          handle_callback(RequestID, Module, Function, Arguments, Data),
+          wait_port_response(Data, Deadline);
         {error, Error} ->
           {error, Error}
       end;
     {Port, {exit_status, StatusCode}} ->
-      ?LOGERROR("received exit from port: ~p, status code: ~p", [Port, StatusCode]),
+      ?LOGERROR("port exited during execution: ~p, status code: ~p", [Port, StatusCode]),
       exit({port_exit, {status_code, StatusCode}})
   after
-    Timeout ->
-      ?LOGERROR("port timeout after ~p ms, closing port: ~p", [Timeout, Port]),
-      erlang:port_close(Port),
+    Remaining ->
+      ?LOGERROR("port timeout after ~p ms, closing port: ~p", [Remaining, Port]),
+      catch erlang:port_close(Port),
       exit(port_timeout)
   end.
 
-%%% +--------------------------------------------------------------+
-%%% |                     Erlang callback protocol                  |
-%%% +--------------------------------------------------------------+
-
-handle_call(
+handle_callback(
   RequestID,
   Module,
   Function,
   Arguments,
-  #state{
-    port = Port,
-    allowed_modules = AllowedModules
-  }
+  #data{port = Port, allowed_modules = AllowedModules}
 ) ->
   Response =
     try
       is_module_allowed(Module, AllowedModules),
-      is_function_available(Module, Function, Arguments),
+      is_function_exported(Module, Function, Arguments),
       ?COMMAND_REPLY(RequestID, {ok, erlang:apply(Module, Function, Arguments)})
     catch
       throw:module_not_allowed ->
@@ -246,14 +205,14 @@ handle_call(
       _Class:Error ->
         ?COMMAND_REPLY(RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))})
     end,
-  try_port_command(Port, Response).
+  send_port_command(Port, Response).
 
-try_port_command(Port, Term) ->
+send_port_command(Port, Term) ->
   case erlang:port_command(Port, erlang:term_to_binary(Term), [nosuspend]) of
     true ->
       ok;
     false ->
-      erlang:port_close(Port),
+      catch erlang:port_close(Port),
       exit(port_command_aborted)
   end.
 
@@ -261,33 +220,21 @@ is_module_allowed(_Module, all) ->
   ok;
 is_module_allowed(Module, AllowedModules) ->
   case AllowedModules of
-    #{Module := true} ->
-      ok;
-    _Other ->
-      throw(module_not_allowed)
+    #{Module := true} -> ok;
+    _ -> throw(module_not_allowed)
   end.
-  
-is_function_available(Module, Function, Arguments) when is_list(Arguments) ->
+
+is_function_exported(Module, Function, Arguments) when is_list(Arguments) ->
   code:ensure_loaded(Module),
   case erlang:function_exported(Module, Function, length(Arguments)) of
-    true ->
-      ok;
-    false ->
-      throw(function_not_found)
+    true -> ok;
+    false -> throw(function_not_found)
   end;
-is_function_available(_Module, _Function, _Arguments) ->
+is_function_exported(_Module, _Function, _Arguments) ->
   throw(function_arguments_not_list).
-  
+
 collect_port_info(Port) ->
-  Keys = [
-    connected,
-    id,
-    input,
-    output,
-    memory,
-    os_pid,
-    queue_size
-  ],
+  Keys = [connected, id, input, output, memory, os_pid, queue_size],
   lists:foldl(
     fun(Key, Acc) ->
       {Key, Value} = erlang:port_info(Port, Key),
@@ -296,4 +243,3 @@ collect_port_info(Port) ->
     #{},
     Keys
   ).
-  
