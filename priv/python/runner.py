@@ -269,20 +269,24 @@ def _handle_request(
     safe_builtins: dict[str, Any],
     caller: ErlangCaller,
 ) -> tuple:
-    """Execute a single code-execution request and return a response tuple."""
-    if not isinstance(message, tuple) or len(message) != 3 or message[0] != _ATOM_EXEC:
+    if not isinstance(message, tuple) or len(message) != 4 or message[0] != _ATOM_EXEC:
         return _error_response("Invalid message format")
 
-    _, code, arguments = message
+    _, code, arguments, state = message
 
     if isinstance(code, bytes):
         code = code.decode("utf-8")
 
-    local_vars: dict[str, Any] = {"arguments": arguments, "result": None, "erlang": caller}
+    local_vars: dict[str, Any] = {
+        "arguments": arguments,
+        "state": state,
+        "result": None,
+        "erlang": caller,
+    }
 
     try:
         exec(code, {"__builtins__": safe_builtins}, local_vars)
-        return _ok_response(local_vars.get("result"))
+        return _ok_response((local_vars.get("result"), local_vars.get("state")))
     except SystemExit:
         return _error_response("SystemExit is not allowed")
     except Exception as e:

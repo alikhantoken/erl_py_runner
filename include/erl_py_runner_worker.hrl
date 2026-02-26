@@ -13,12 +13,12 @@
 }).
 
 %% Available commands that are used to communicate with python.
--define(COMMAND_EXECUTE(Code, Arguments), {exec, Code, Arguments}).
+-define(COMMAND_EXECUTE(Code, Arguments, State), {exec, Code, Arguments, State}).
 -define(COMMAND_INIT(Modules), {init, Modules}).
 -define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
 
 %% Gen server call requests.
--define(CALL_RUN(Code, Arguments), {run, Code, Arguments}).
+-define(CALL_RUN(Code, Arguments, State), {run, Code, Arguments, State}).
 -define(CALL_INFO, info).
 
 %% Worker name in the supervision tree.

@@ -16,7 +16,7 @@
 -export([
   start_child/2,
   start_link/1,
-  run/2, run/3,
+  run/2, run/3, run/4,
   info/1
 ]).
 
@@ -51,11 +51,16 @@ start_link(Config) ->
   gen_server:start_link(?MODULE, Config, []).
 
 run(Code, Arguments) ->
-  run(Code, Arguments, _DefaultTimeout = 60000).
+  run(Code, Arguments, undefined, _DefaultTimeout = 60000).
 
 run(Code, Arguments, Timeout) ->
+  run(Code, Arguments, undefined, Timeout);
+run(Code, Arguments, State) ->
+  run(Code, Arguments, State, _DefaultTimeout = 60000).
+
+run(Code, Arguments, State, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
-  gen_server:call(Worker, ?CALL_RUN(Code, Arguments), Timeout).
+  gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Timeout).
 
 info(Worker) ->
   gen_server:call(Worker, ?CALL_INFO, 5000).
@@ -89,12 +94,12 @@ init(#{
   }}.
 
 handle_call(
-  ?CALL_RUN(Code, Arguments),
+  ?CALL_RUN(Code, Arguments, State),
   _Caller,
   #data{port = Port, timeout = Timeout} = Data
 ) ->
   Deadline = erlang:monotonic_time(millisecond) + Timeout,
-  send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments)),
+  send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
   Result = wait_port_response(Data, Deadline),
   erl_py_runner_pool:send_worker_ready(self()),
   {reply, Result, Data};
@@ -165,8 +170,8 @@ wait_port_response(
         catch _:_ -> {error, invalid_term_received}
         end,
       case Term of
-        {ok, Response} ->
-          {ok, Response};
+        {ok, {Response, NewState}} ->
+          {ok, Response, NewState};
         {call, RequestID, Module, Function, Arguments} ->
           handle_callback(RequestID, Module, Function, Arguments, Data),
           wait_port_response(Data, Deadline);
