@@ -43,6 +43,7 @@ init([]) ->
   
   {ok, #{
     runner := Runner,
+    python := Python,
     venv_dir := VenvDirectory
   }} = ?ENV(environment),
   
@@ -52,8 +53,14 @@ init([]) ->
     period => ?SUP_DEFAULT_PERIOD
   },
   
+  PythonCMD =
+    case Python of
+      system -> ?PYTHON_SYSTEM ++ " -u ";
+      environment -> ?PYTHON_PATH(VenvDirectory) ++ " -u "
+    end,
+    
   WorkerConfig = #{
-    runner => ?PYTHON_PATH(VenvDirectory) ++ " -u " ++ Runner,
+    runner => PythonCMD ++ Runner,
     timeout => Timeout,
     python_modules => PythonModules,
     erlang_modules => ErlangModules

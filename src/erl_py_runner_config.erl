@@ -43,6 +43,7 @@ verify(Config) ->
 default() ->
   #{
     environment => #{
+      python => system,
       requirements => "python/requirements.txt",
       runner => "python/runner.py",
       venv_dir => ".venv"
@@ -76,6 +77,11 @@ default() ->
   }.
   
 ensure(#{
+  python := system
+}) ->
+  ok;
+ensure(#{
+  python := environment,
   venv_dir := VenvDirectory,
   requirements := Requirements
 }) ->
@@ -130,16 +136,26 @@ deep_merge(Default, Override) when is_map(Default), is_map(Override) ->
   );
 deep_merge(_Default, Override) ->
   Override.
-  
+
 resolve_environment(#{
+  python := system,
+  runner := Runner
+} = Environment) ->
+  Environment#{
+    runner => resolve_path(code:priv_dir(?APP_NAME), Runner),
+    requirements => undefined,
+    venv_dir => undefined
+  };
+resolve_environment(#{
+  python := environment,
   runner := Runner,
   requirements := Requirements,
   venv_dir := VenvDir
-} = Env) ->
-  Env#{
-    runner := resolve_path(code:priv_dir(?APP_NAME), Runner),
-    requirements := resolve_path(code:priv_dir(?APP_NAME), Requirements),
-    venv_dir := resolve_path(code:priv_dir(?APP_NAME), VenvDir)
+} = Environment) ->
+  Environment#{
+    runner => resolve_path(code:priv_dir(?APP_NAME), Runner),
+    requirements => resolve_path(code:priv_dir(?APP_NAME), Requirements),
+    venv_dir => resolve_path(code:priv_dir(?APP_NAME), VenvDir)
   }.
 
 resolve_path(RootPath, Path) ->
