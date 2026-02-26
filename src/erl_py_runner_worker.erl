@@ -51,13 +51,11 @@ start_link(Config) ->
   gen_server:start_link(?MODULE, Config, []).
 
 run(Code, Arguments) ->
-  run(Code, Arguments, undefined, _DefaultTimeout = 60000).
+  run(Code, Arguments, _State = undefined, _DefaultTimeout = 60000).
 
-run(Code, Arguments, Timeout) ->
-  run(Code, Arguments, undefined, Timeout);
 run(Code, Arguments, State) ->
   run(Code, Arguments, State, _DefaultTimeout = 60000).
-
+  
 run(Code, Arguments, State, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
   gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Timeout).

@@ -21,11 +21,11 @@
 
 -spec run(binary(), term()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments) ->
-  run(Code, Arguments, _State = undefined, _DefaultTimeout = 60000).
+  erl_py_runner_worker:run(Code, Arguments).
 
 -spec run(binary(), term(), term()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments, State) ->
-  run(Code, Arguments, State, _DefaultTimeout = 60000).
+  erl_py_runner_worker:run(Code, Arguments, State).
   
 -spec run(binary(), term(), term(), timeout()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments, State, Timeout) ->
