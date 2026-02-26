@@ -21,7 +21,7 @@
 
 -spec run(binary(), term()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments) ->
-  run(Code, Arguments, _DefaultTimeout = 60000).
+  run(Code, Arguments, _State = undefined, _DefaultTimeout = 60000).
 
 -spec run(binary(), term(), term()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments, State) ->
