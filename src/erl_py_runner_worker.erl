@@ -18,6 +18,7 @@
   start_link/1,
   run/2, run/3, run/4,
   load_library/3,
+  delete_library/2,
   info/1
 ]).
 
@@ -65,6 +66,9 @@ run(Code, Arguments, State, Timeout) ->
 load_library(Worker, Name, Code) ->
   gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
 
+delete_library(Worker, Name) ->
+  gen_server:call(Worker, ?CALL_DELETE_LIBRARY(Name), ?TIMEOUT_LOAD_LIBRARY).
+
 info(Worker) ->
   gen_server:call(Worker, ?CALL_INFO, ?TIMEOUT_INFO).
 
@@ -94,17 +98,24 @@ init(#{
           _Other -> #{}
         end
     },
-  handshake(Data, AllowedPythonModules),
-  erl_py_runner_pool:send_worker_start(self()),
-  {ok, Data}.
+  ok = handshake(Data, AllowedPythonModules),
+  {ok, Libraries} = erl_py_runner_loader:get_libraries(),
+  case reload_libraries(Data, Libraries) of
+    ok ->
+      erl_py_runner_pool:send_worker_start(self()),
+      {ok, Data};
+    {error, Reason} ->
+      ?LOGERROR("failed to init worker due to library reload fail: ~p", [Reason]),
+      {stop, {library_init_failed, Reason}}
+  end.
 
 handle_call(
   ?CALL_RUN(Code, Arguments, State),
   _Caller,
   #data{port = Port, timeout = Timeout} = Data
 ) ->
-  Deadline = ?MONOTONIC_MS + Timeout,
   send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
+  Deadline = ?MONOTONIC_MS + Timeout,
   Result = wait_port_response(Data, Deadline),
   erl_py_runner_pool:send_worker_ready(self()),
   {reply, Result, Data};
@@ -115,6 +126,16 @@ handle_call(
   #data{port = Port, timeout = Timeout} = Data
 ) ->
   send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code)),
+  Deadline = ?MONOTONIC_MS + Timeout,
+  Result = wait_port_response(Data, Deadline),
+  {reply, Result, Data};
+
+handle_call(
+  ?CALL_DELETE_LIBRARY(Name),
+  _Caller,
+  #data{port = Port, timeout = Timeout} = Data
+) ->
+  send_port_command(Port, ?COMMAND_DELETE_LIBRARY(Name)),
   Deadline = ?MONOTONIC_MS + Timeout,
   Result = wait_port_response(Data, Deadline),
   {reply, Result, Data};
@@ -258,3 +279,15 @@ collect_port_info(Port) ->
     #{},
     ?PORT_INFO_KEYS
   ).
+
+reload_libraries(_Data, []) ->
+  ok;
+reload_libraries(#data{port = Port, timeout = Timeout} = Data, [{Name, Code} | Rest]) ->
+  send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code)),
+  Deadline = ?MONOTONIC_MS + Timeout,
+  case wait_port_response(Data, Deadline) of
+    ok ->
+      reload_libraries(Data, Rest);
+    {error, Error} ->
+      {error, Error}
+  end.

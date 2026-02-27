@@ -66,12 +66,7 @@ default() ->
           binary,
           string
         ],
-        python_modules => [
-          <<"math">>,
-          <<"re">>,
-          <<"datetime">>,
-          <<"json">>
-        ]
+        python_modules => all
       }
     }
   }.

@@ -1,5 +1,5 @@
 %%% +--------------------------------------------------------------+
-%%% | Common Test suite for erl_py_runner                         |
+%%% | Common Test suite for erl_py_runner                          |
 %%% +--------------------------------------------------------------+
 
 -module(erl_py_runner_SUITE).

@@ -21,7 +21,8 @@
 }).
 
 %% Gen server call requests.
--define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
--define(TIMEOUT_LOAD_LIBRARY, 180000).
+-define(CALL_GET_WORKERS, get_workers).
+
+-define(TIMEOUT_GET_WORKERS, 5000).
 
 -endif.

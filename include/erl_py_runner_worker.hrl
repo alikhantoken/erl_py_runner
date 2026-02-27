@@ -20,10 +20,12 @@
 -define(COMMAND_INIT(Modules), {init, Modules}).
 -define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
 -define(COMMAND_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
+-define(COMMAND_DELETE_LIBRARY(Name), {delete_library, Name}).
 
 %% Gen server call requests.
 -define(CALL_RUN(Code, Arguments, State), {run, Code, Arguments, State}).
 -define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
+-define(CALL_DELETE_LIBRARY(Name), {delete_library, Name}).
 -define(CALL_INFO, info).
 
 %% Timeouts for each API public function.

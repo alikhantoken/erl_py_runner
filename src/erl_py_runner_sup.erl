@@ -65,6 +65,10 @@ init([]) ->
     erlang_modules => ErlangModules
   },
   
+  %% NOTE!
+  %% Loader must start before pool!
+  %% Pool starts workers and all workers call loader during
+  %% initialization to load the libraries list before joining the pool.
   Children = [
     #{
       id => erl_py_runner_worker_sup,
@@ -72,6 +76,13 @@ init([]) ->
       restart => permanent,
       shutdown => infinity,
       type => supervisor
+    },
+    #{
+      id => erl_py_runner_loader,
+      start => {erl_py_runner_loader, start_link, []},
+      restart => permanent,
+      shutdown => ?WORKER_DEFAULT_LOADER_SHUTDOWN,
+      type => worker
     },
     #{
       id => erl_py_runner_pool,

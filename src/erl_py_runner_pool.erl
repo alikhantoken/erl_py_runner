@@ -17,7 +17,7 @@
   get_worker/1,
   send_worker_ready/1,
   send_worker_start/1,
-  send_load_library/2
+  get_workers/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -48,14 +48,14 @@ get_worker(Timeout) ->
       gen_server:call(?MODULE, ?GET_WORKER, Timeout)
   end.
 
+get_workers() ->
+  gen_server:call(?MODULE, ?CALL_GET_WORKERS, ?TIMEOUT_GET_WORKERS).
+  
 send_worker_start(PID) ->
   ?MODULE ! ?WORKER_START(PID).
   
 send_worker_ready(PID) ->
   ?MODULE ! ?WORKER_READY(PID).
-
-send_load_library(Name, Code) ->
-  gen_server:call(?MODULE, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
 
 %%% +--------------------------------------------------------------+
 %%% |                Gen Server Behaviour Callbacks                |
@@ -112,31 +112,15 @@ handle_call(
   end;
 
 handle_call(
-  ?CALL_LOAD_LIBRARY(Name, Code),
-  _From,
-  #pool{worker_monitors = WorkerMonitors} = Pool
+  ?CALL_GET_WORKERS,
+  _Caller,
+  #pool{
+    worker_monitors = WorkerMonitors
+  } = Pool
 ) ->
-  Errors =
-    lists:foldl(
-      fun(WorkerPID, Acc) ->
-        case gen_server:call(WorkerPID, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY) of
-          ok ->
-            Acc;
-          {error, Reason} ->
-            [{WorkerPID, Reason} | Acc]
-        end
-      end,
-      [],
-      maps:values(WorkerMonitors)
-    ),
-  Reply =
-    case Errors of
-      [] -> ok;
-      _  -> {error, Errors}
-    end,
-  {reply, Reply, Pool};
+  {reply, maps:values(WorkerMonitors), Pool};
 
-handle_call(Unexpected, _From, Pool) ->
+handle_call(Unexpected, _Caller, Pool) ->
   ?LOGWARNING("pool received unexpected call: ~p", [Unexpected]),
   {reply, {error, unexpected_message}, Pool}.
 
@@ -206,7 +190,12 @@ pop_idle() ->
     PID ->
       case ets:take(?IDLE_WORKERS_TAB, PID) of
         [{PID}] ->
-          {ok, PID};
+          % Never return a dead worker.
+          % DOWN may not have been processed yet by pool.
+          case erlang:is_process_alive(PID) of
+            true -> {ok, PID};
+            false -> pop_idle()
+          end;
         [] ->
           pop_idle()
       end

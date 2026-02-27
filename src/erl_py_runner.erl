@@ -12,6 +12,7 @@
 -export([
   run/2, run/3, run/4,
   load_library/2,
+  delete_library/1,
   restart/0,
   info/0
 ]).
@@ -34,7 +35,11 @@ run(Code, Arguments, State, Timeout) ->
 
 -spec load_library(binary(), binary()) -> ok | {error, term()}.
 load_library(Name, Code) ->
-  erl_py_runner_pool:send_load_library(Name, Code).
+  erl_py_runner_loader:load_library(Name, Code).
+
+-spec delete_library(binary()) -> ok | {error, term()}.
+delete_library(Name) ->
+  erl_py_runner_loader:delete_library(Name).
 
 -spec restart() -> ok | {error, term()}.
 restart() ->
