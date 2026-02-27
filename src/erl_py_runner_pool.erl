@@ -17,7 +17,7 @@
   get_worker/1,
   send_worker_ready/1,
   send_worker_start/1,
-  load_library/2
+  send_load_library/2
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -49,13 +49,13 @@ get_worker(Timeout) ->
   end.
 
 send_worker_start(PID) ->
-  ?MODULE ! {?WORKER_START, PID}.
+  ?MODULE ! ?WORKER_START(PID).
   
 send_worker_ready(PID) ->
-  ?MODULE ! {?WORKER_READY, PID}.
+  ?MODULE ! ?WORKER_READY(PID).
 
-load_library(Name, Code) ->
-  gen_server:call(?MODULE, {load_library, Name, Code}, infinity).
+send_load_library(Name, Code) ->
+  gen_server:call(?MODULE, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
 
 %%% +--------------------------------------------------------------+
 %%% |                Gen Server Behaviour Callbacks                |
@@ -112,14 +112,14 @@ handle_call(
   end;
 
 handle_call(
-  {load_library, Name, Code},
+  ?CALL_LOAD_LIBRARY(Name, Code),
   _From,
   #pool{worker_monitors = WorkerMonitors} = Pool
 ) ->
   Errors =
     lists:foldl(
       fun(WorkerPID, Acc) ->
-        case gen_server:call(WorkerPID, {load_library, Name, Code}, infinity) of
+        case gen_server:call(WorkerPID, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY) of
           ok ->
             Acc;
           {error, Reason} ->
@@ -141,7 +141,7 @@ handle_call(Unexpected, _From, Pool) ->
   {reply, {error, unexpected_message}, Pool}.
 
 handle_info(
-  {?WORKER_START, PID},
+  ?WORKER_START(PID),
   #pool{worker_monitors = WorkerMonitors} = Pool
 ) ->
   MonRef = erlang:monitor(process, PID),
@@ -149,7 +149,7 @@ handle_info(
   {noreply, dispatch(PID, NewPool)};
 
 handle_info(
-  {?WORKER_READY, PID},
+  ?WORKER_READY(PID),
   Pool
 ) ->
   {noreply, dispatch(PID, Pool)};

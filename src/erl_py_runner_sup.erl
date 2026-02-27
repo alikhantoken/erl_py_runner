@@ -7,7 +7,6 @@
 -behaviour(supervisor).
 -include("erl_py_runner.hrl").
 
-
 %%% +--------------------------------------------------------------+
 %%% |                              API                             |
 %%% +--------------------------------------------------------------+
@@ -55,7 +54,7 @@ init([]) ->
   
   PythonCMD =
     case Python of
-      system -> ?PYTHON_SYSTEM ++ " -u ";
+      system -> "python3 -u ";
       environment -> ?PYTHON_PATH(VenvDirectory) ++ " -u "
     end,
     

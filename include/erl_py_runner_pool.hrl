@@ -6,9 +6,9 @@
 -ifndef(ERL_PY_RUNNER_POOL).
 -define(ERL_PY_RUNNER_POOL, 1).
 
--define(GET_WORKER,   get_worker).
--define(WORKER_START, worker_started).
--define(WORKER_READY, worker_ready).
+-define(GET_WORKER,        get_worker).
+-define(WORKER_START(PID), {worker_start, PID}).
+-define(WORKER_READY(PID), {worker_ready, PID}).
 
 -define(IDLE_WORKERS_TAB, erl_py_runner_pool_idle).
 
@@ -19,5 +19,9 @@
   worker_monitors,
   caller_monitors
 }).
+
+%% Gen server call requests.
+-define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
+-define(TIMEOUT_LOAD_LIBRARY, 180000).
 
 -endif.

@@ -34,7 +34,7 @@ run(Code, Arguments, State, Timeout) ->
 
 -spec load_library(binary(), binary()) -> ok | {error, term()}.
 load_library(Name, Code) ->
-  erl_py_runner_pool:load_library(Name, Code).
+  erl_py_runner_pool:send_load_library(Name, Code).
 
 -spec restart() -> ok | {error, term()}.
 restart() ->

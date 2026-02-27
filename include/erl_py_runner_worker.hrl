@@ -12,6 +12,9 @@
   allowed_modules = all
 }).
 
+%% Worker name in the supervision tree.
+-define(WORKER_NAME, "erl_py_runner_worker_").
+
 %% Available commands that are used to communicate with python.
 -define(COMMAND_EXECUTE(Code, Arguments, State), {exec, Code, Arguments, State}).
 -define(COMMAND_INIT(Modules), {init, Modules}).
@@ -23,7 +26,13 @@
 -define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
 -define(CALL_INFO, info).
 
-%% Worker name in the supervision tree.
--define(WORKER_NAME, "erl_py_runner_worker_").
+%% Timeouts for each API public function.
+-define(TIMEOUT_RUN, 60000).
+-define(TIMEOUT_LOAD_LIBRARY, 180000).
+-define(TIMEOUT_INFO, 30000).
+
+-define(PACKET_SIZE, 4).
+-define(MONOTONIC_MS, erlang:monotonic_time(millisecond)).
+-define(PORT_INFO_KEYS, [connected, id, input, output, memory, os_pid, queue_size]).
 
 -endif.

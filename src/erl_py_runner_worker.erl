@@ -38,34 +38,35 @@
 %%% +--------------------------------------------------------------+
 
 start_child(Number, Config) ->
-  {ok, PID} =
-    supervisor:start_child(erl_py_runner_worker_sup, #{
-      id => worker_id(Number),
-      start => {?MODULE, start_link, [Config]},
-      restart => permanent,
-      shutdown => 60000,
-      type => worker
-    }),
-  PID.
+  case supervisor:start_child(erl_py_runner_worker_sup, #{
+    id => worker_id(Number),
+    start => {?MODULE, start_link, [Config]},
+    restart => permanent,
+    shutdown => 60000,
+    type => worker
+  }) of
+    {ok, PID} -> {ok, PID};
+    {error, Error} -> {error, Error}
+  end.
 
 start_link(Config) ->
   gen_server:start_link(?MODULE, Config, []).
 
 run(Code, Arguments) ->
-  run(Code, Arguments, _State = undefined, _DefaultTimeout = 60000).
+  run(Code, Arguments, _State = undefined, ?TIMEOUT_RUN).
 
 run(Code, Arguments, State) ->
-  run(Code, Arguments, State, _DefaultTimeout = 60000).
+  run(Code, Arguments, State, ?TIMEOUT_RUN).
   
 run(Code, Arguments, State, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
   gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Timeout).
 
 load_library(Worker, Name, Code) ->
-  gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Name, Code), infinity).
+  gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
 
 info(Worker) ->
-  gen_server:call(Worker, ?CALL_INFO, 5000).
+  gen_server:call(Worker, ?CALL_INFO, ?TIMEOUT_INFO).
 
 %%% +--------------------------------------------------------------+
 %%% |                     Gen Server Callbacks                     |
@@ -80,27 +81,29 @@ init(#{
   Port =
     erlang:open_port(
       {spawn, Runner},
-      [{packet, 4}, binary, exit_status]
+      [{packet, ?PACKET_SIZE}, binary, exit_status]
     ),
-  handshake(Port, Timeout, AllowedPythonModules),
+  Data =
+    #data{
+      port = Port,
+      timeout = Timeout,
+      allowed_modules =
+        case AllowedErlangModules of
+          Modules when is_list(Modules) -> maps:from_keys(Modules, true);
+          all -> all;
+          _Other -> #{}
+        end
+    },
+  handshake(Data, AllowedPythonModules),
   erl_py_runner_pool:send_worker_start(self()),
-  {ok, #data{
-    port = Port,
-    timeout = Timeout,
-    allowed_modules =
-      case AllowedErlangModules of
-        Modules when is_list(Modules) -> maps:from_keys(Modules, true);
-        all -> all;
-        _Other -> #{}
-      end
-  }}.
+  {ok, Data}.
 
 handle_call(
   ?CALL_RUN(Code, Arguments, State),
   _Caller,
   #data{port = Port, timeout = Timeout} = Data
 ) ->
-  Deadline = erlang:monotonic_time(millisecond) + Timeout,
+  Deadline = ?MONOTONIC_MS + Timeout,
   send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
   Result = wait_port_response(Data, Deadline),
   erl_py_runner_pool:send_worker_ready(self()),
@@ -112,7 +115,8 @@ handle_call(
   #data{port = Port, timeout = Timeout} = Data
 ) ->
   send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code)),
-  Result = wait_load_response(Port, Timeout),
+  Deadline = ?MONOTONIC_MS + Timeout,
+  Result = wait_port_response(Data, Deadline),
   {reply, Result, Data};
 
 handle_call(
@@ -148,32 +152,26 @@ terminate(_Reason, #data{port = Port}) ->
 worker_id(Number) ->
   erlang:list_to_atom(?WORKER_NAME ++ erlang:integer_to_list(Number)).
 
-handshake(Port, Timeout, AllowedModules) ->
-  send_port_command(Port, ?COMMAND_INIT(AllowedModules)),
-  receive
-    {Port, {data, Response}} ->
-      case erlang:binary_to_term(Response) of
-        ok ->
-          ok;
-        {error, Error} ->
-          ?LOGERROR("port init failed: ~p, error: ~p", [Port, Error]),
-          catch erlang:port_close(Port),
-          exit({initialization_fail, Error})
-      end;
-    {Port, {exit_status, StatusCode}} ->
-      ?LOGERROR("received port exit during init: ~p, status code: ~p", [Port, StatusCode]),
-      exit({port_exit, {status_code, StatusCode}})
-  after
-    Timeout ->
-      catch erlang:port_close(Port),
-      exit(initialization_timeout)
+handshake(
+  #data{
+    port = Port,
+    timeout = Timeout
+  } = Data,
+  AllowedPythonModules
+) ->
+  send_port_command(Port, ?COMMAND_INIT(AllowedPythonModules)),
+  Deadline = ?MONOTONIC_MS + Timeout,
+  case wait_port_response(Data, Deadline) of
+    ok -> ok;
+    {ok, Response} -> exit({init_unexpected, Response});
+    {error, Error} -> exit({init_failed, Error})
   end.
 
 wait_port_response(
   #data{port = Port} = Data,
   Deadline
 ) ->
-  Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
+  Remaining = max(0, Deadline - ?MONOTONIC_MS),
   receive
     {Port, {data, Binary}} ->
       Term =
@@ -181,8 +179,10 @@ wait_port_response(
         catch _:_ -> {error, invalid_term_received}
         end,
       case Term of
-        {ok, {Response, NewState}} ->
-          {ok, Response, NewState};
+        ok ->
+          ok;
+        {ok, {Result, State}} ->
+          {ok, Result, State};
         {call, RequestID, Module, Function, Arguments} ->
           handle_callback(RequestID, Module, Function, Arguments, Data),
           wait_port_response(Data, Deadline);
@@ -223,29 +223,6 @@ handle_callback(
     end,
   send_port_command(Port, Response).
 
-wait_load_response(Port, Timeout) ->
-  receive
-    {Port, {data, Binary}} ->
-      try erlang:binary_to_term(Binary) of
-        ok ->
-          ok;
-        {error, Reason} ->
-          {error, Reason};
-        _Unexpected ->
-          {error, unexpected_response}
-      catch _:_ ->
-        {error, invalid_term_received}
-      end;
-    {Port, {exit_status, StatusCode}} ->
-      ?LOGERROR("port exited during load library: ~p, status code: ~p", [Port, StatusCode]),
-      exit({port_exit, {status_code, StatusCode}})
-  after
-    Timeout ->
-      ?LOGERROR("port timeout during load library, closing port: ~p", [Port]),
-      catch erlang:port_close(Port),
-      exit(port_timeout)
-  end.
-
 send_port_command(Port, Term) ->
   case erlang:port_command(Port, erlang:term_to_binary(Term), [nosuspend]) of
     true ->
@@ -273,12 +250,11 @@ is_function_exported(_Module, _Function, _Arguments) ->
   throw(function_arguments_not_list).
 
 collect_port_info(Port) ->
-  Keys = [connected, id, input, output, memory, os_pid, queue_size],
   lists:foldl(
     fun(Key, Acc) ->
       {Key, Value} = erlang:port_info(Port, Key),
       Acc#{Key => Value}
     end,
     #{},
-    Keys
+    ?PORT_INFO_KEYS
   ).

@@ -33,6 +33,5 @@
 
 -define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
 -define(PYTHON_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "python3"])).
--define(PYTHON_SYSTEM, "python3").
 
 -endif.
