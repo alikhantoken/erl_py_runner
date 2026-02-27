@@ -54,6 +54,7 @@ _ATOM_INIT = Atom("init")
 _ATOM_EXEC = Atom("exec")
 _ATOM_CALL = Atom("call")
 _ATOM_CALL_REPLY = Atom("call_reply")
+_ATOM_LOAD_LIBRARY = Atom("load_library")
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -264,6 +265,34 @@ class ErlangCaller:
 # ---------------------------------------------------------------------------
 
 
+def _handle_load_library(
+    message: Any,
+    safe_builtins: dict[str, Any],
+) -> tuple:
+    if not isinstance(message, tuple) or len(message) != 3 or message[0] != _ATOM_LOAD_LIBRARY:
+        return _error_response("Invalid load library message format")
+
+    _, name, code = message
+    if isinstance(name, bytes):
+        name = name.decode("utf-8")
+    if isinstance(code, bytes):
+        code = code.decode("utf-8")
+
+    module = types.ModuleType(name)
+    module.__dict__["__builtins__"] = safe_builtins
+
+    try:
+        exec(code, module.__dict__)
+    except SystemExit:
+        return _error_response("SystemExit is not allowed")
+    except Exception as e:
+        return _error_response(f"{type(e).__name__}: {e}")
+
+    sys.modules[name] = module
+
+    return _ATOM_OK
+
+
 def _handle_request(
     message: Any,
     safe_builtins: dict[str, Any],
@@ -322,6 +351,7 @@ def _perform_handshake() -> dict[str, Any]:
         allowed_modules = None
     else:
         allowed_modules = [_to_str(m) for m in raw_modules]
+
     safe_builtins = _build_safe_builtins(allowed_modules)
 
     write_message(_ATOM_OK)
@@ -346,7 +376,14 @@ def main() -> None:
             write_message(_error_response("Malformed message"))
             continue
 
-        response = _handle_request(message, safe_builtins, caller)
+        if (
+            isinstance(message, tuple)
+            and len(message) >= 1
+            and message[0] == _ATOM_LOAD_LIBRARY
+        ):
+            response = _handle_load_library(message, safe_builtins)
+        else:
+            response = _handle_request(message, safe_builtins, caller)
 
         try:
             write_message(response)

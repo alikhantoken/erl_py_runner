@@ -11,6 +11,7 @@
 
 -export([
   run/2, run/3, run/4,
+  load_library/2,
   restart/0,
   info/0
 ]).
@@ -30,6 +31,10 @@ run(Code, Arguments, State) ->
 -spec run(binary(), term(), term(), timeout()) -> {ok, term(), term()} | {error, term()}.
 run(Code, Arguments, State, Timeout) ->
   erl_py_runner_worker:run(Code, Arguments, State, Timeout).
+
+-spec load_library(binary(), binary()) -> ok | {error, term()}.
+load_library(Name, Code) ->
+  erl_py_runner_pool:load_library(Name, Code).
 
 -spec restart() -> ok | {error, term()}.
 restart() ->

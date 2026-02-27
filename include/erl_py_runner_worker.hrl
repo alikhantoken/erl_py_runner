@@ -16,9 +16,11 @@
 -define(COMMAND_EXECUTE(Code, Arguments, State), {exec, Code, Arguments, State}).
 -define(COMMAND_INIT(Modules), {init, Modules}).
 -define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
+-define(COMMAND_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
 
 %% Gen server call requests.
 -define(CALL_RUN(Code, Arguments, State), {run, Code, Arguments, State}).
+-define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
 -define(CALL_INFO, info).
 
 %% Worker name in the supervision tree.

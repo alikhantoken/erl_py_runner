@@ -16,7 +16,8 @@
 -export([
   get_worker/1,
   send_worker_ready/1,
-  send_worker_start/1
+  send_worker_start/1,
+  load_library/2
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -52,6 +53,9 @@ send_worker_start(PID) ->
   
 send_worker_ready(PID) ->
   ?MODULE ! {?WORKER_READY, PID}.
+
+load_library(Name, Code) ->
+  gen_server:call(?MODULE, {load_library, Name, Code}, infinity).
 
 %%% +--------------------------------------------------------------+
 %%% |                Gen Server Behaviour Callbacks                |
@@ -106,6 +110,31 @@ handle_call(
           }}
       end
   end;
+
+handle_call(
+  {load_library, Name, Code},
+  _From,
+  #pool{worker_monitors = WorkerMonitors} = Pool
+) ->
+  Errors =
+    lists:foldl(
+      fun(WorkerPID, Acc) ->
+        case gen_server:call(WorkerPID, {load_library, Name, Code}, infinity) of
+          ok ->
+            Acc;
+          {error, Reason} ->
+            [{WorkerPID, Reason} | Acc]
+        end
+      end,
+      [],
+      maps:values(WorkerMonitors)
+    ),
+  Reply =
+    case Errors of
+      [] -> ok;
+      _  -> {error, Errors}
+    end,
+  {reply, Reply, Pool};
 
 handle_call(Unexpected, _From, Pool) ->
   ?LOGWARNING("pool received unexpected call: ~p", [Unexpected]),

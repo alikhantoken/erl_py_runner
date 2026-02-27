@@ -17,6 +17,7 @@
   start_child/2,
   start_link/1,
   run/2, run/3, run/4,
+  load_library/3,
   info/1
 ]).
 
@@ -60,6 +61,9 @@ run(Code, Arguments, State, Timeout) ->
   {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
   gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Timeout).
 
+load_library(Worker, Name, Code) ->
+  gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Name, Code), infinity).
+
 info(Worker) ->
   gen_server:call(Worker, ?CALL_INFO, 5000).
 
@@ -100,6 +104,15 @@ handle_call(
   send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
   Result = wait_port_response(Data, Deadline),
   erl_py_runner_pool:send_worker_ready(self()),
+  {reply, Result, Data};
+
+handle_call(
+  ?CALL_LOAD_LIBRARY(Name, Code),
+  _Caller,
+  #data{port = Port, timeout = Timeout} = Data
+) ->
+  send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code)),
+  Result = wait_load_response(Port, Timeout),
   {reply, Result, Data};
 
 handle_call(
@@ -209,6 +222,29 @@ handle_callback(
         ?COMMAND_REPLY(RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))})
     end,
   send_port_command(Port, Response).
+
+wait_load_response(Port, Timeout) ->
+  receive
+    {Port, {data, Binary}} ->
+      try erlang:binary_to_term(Binary) of
+        ok ->
+          ok;
+        {error, Reason} ->
+          {error, Reason};
+        _Unexpected ->
+          {error, unexpected_response}
+      catch _:_ ->
+        {error, invalid_term_received}
+      end;
+    {Port, {exit_status, StatusCode}} ->
+      ?LOGERROR("port exited during load library: ~p, status code: ~p", [Port, StatusCode]),
+      exit({port_exit, {status_code, StatusCode}})
+  after
+    Timeout ->
+      ?LOGERROR("port timeout during load library, closing port: ~p", [Port]),
+      catch erlang:port_close(Port),
+      exit(port_timeout)
+  end.
 
 send_port_command(Port, Term) ->
   case erlang:port_command(Port, erlang:term_to_binary(Term), [nosuspend]) of
