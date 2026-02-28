@@ -391,11 +391,12 @@ class MessageDispatcher:
         }
 
         try:
+            exec_globals = {"__builtins__": self._safe_builtins, **local_vars}
             exec(
                 _to_str(code),
-                {"__builtins__": self._safe_builtins},
-                local_vars,
+                exec_globals,
             )
+            local_vars = exec_globals
             return _ok_response((local_vars.get("result"), local_vars.get("state")))
         except SystemExit:
             return _error_response("SystemExit is not allowed")
