@@ -7,8 +7,7 @@
 -define(ERL_PY_RUNNER_LOADER, 1).
 
 -record(loader, {
-  libraries,
-  library_count
+  libraries
 }).
 
 %% Timeout for broadcasting a library to all existing workers.

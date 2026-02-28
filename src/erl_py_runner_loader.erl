@@ -59,8 +59,7 @@ get_libraries() ->
 
 init([]) ->
   {ok, #loader{
-    libraries = [],
-    library_count = 0
+    libraries = []
   }}.
 
 handle_call(
@@ -74,8 +73,7 @@ handle_call(
       NewLibraries = add_library(Name, Code, Libraries),
       ?LOGINFO("successfully loaded library ~ts from ~p workers", [Name, length(WorkerPIDs)]),
       {reply, ok, State#loader{
-        libraries = NewLibraries,
-        library_count = length(NewLibraries)
+        libraries = NewLibraries
       }};
     Errors ->
       ?LOGERROR("failed to load library ~ts on workers: ~p", [Name, Errors]),
@@ -97,8 +95,7 @@ handle_call(
           NewLibraries = lists:keydelete(Name, 1, Libraries),
           ?LOGINFO("successfully deleted library ~ts from ~p workers", [Name, length(WorkerPIDs)]),
           {reply, ok, State#loader{
-            libraries = NewLibraries,
-            library_count = length(NewLibraries)
+            libraries = NewLibraries
           }};
         Errors ->
           ?LOGERROR("failed to delete library ~ts on workers: ~p", [Name, Errors]),
