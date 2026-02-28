@@ -9,6 +9,7 @@
 -record(data, {
   timeout,
   port,
+  os_pid,
   allowed_modules = all
 }).
 

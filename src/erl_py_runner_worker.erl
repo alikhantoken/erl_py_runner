@@ -39,16 +39,13 @@
 %%% +--------------------------------------------------------------+
 
 start_child(Number, Config) ->
-  case supervisor:start_child(erl_py_runner_worker_sup, #{
+  supervisor:start_child(erl_py_runner_worker_sup, #{
     id => worker_id(Number),
     start => {?MODULE, start_link, [Config]},
     restart => permanent,
     shutdown => 60000,
     type => worker
-  }) of
-    {ok, PID} -> {ok, PID};
-    {error, Error} -> {error, Error}
-  end.
+  }).
 
 start_link(Config) ->
   gen_server:start_link(?MODULE, Config, []).
@@ -60,8 +57,14 @@ run(Code, Arguments, State) ->
   run(Code, Arguments, State, ?TIMEOUT_RUN).
   
 run(Code, Arguments, State, Timeout) ->
-  {ok, Worker} = erl_py_runner_pool:get_worker(Timeout),
-  gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Timeout).
+  Deadline = ?MONOTONIC_MS + Timeout,
+  case erl_py_runner_pool:get_worker(Timeout) of
+    {ok, Worker} ->
+      Remaining = max(1, Deadline - ?MONOTONIC_MS),
+      gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State), Remaining);
+    {error, _} = Error ->
+      Error
+  end.
 
 load_library(Worker, Name, Code) ->
   gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
@@ -87,9 +90,15 @@ init(#{
       {spawn, Runner},
       [{packet, ?PACKET_SIZE}, binary, exit_status]
     ),
+  OsPid =
+    case erlang:port_info(Port, os_pid) of
+      {os_pid, PID} -> PID;
+      undefined -> undefined
+    end,
   Data =
     #data{
       port = Port,
+      os_pid = OsPid,
       timeout = Timeout,
       allowed_modules =
         case AllowedErlangModules of
@@ -158,12 +167,13 @@ handle_info(Unexpected, Data) ->
   ?LOGWARNING("received unexpected message: ~p, ignored", [Unexpected]),
   {noreply, Data}.
   
-handle_cast(Unexpected, Pool) ->
-  ?LOGWARNING("pool received unexpected cast: ~p", [Unexpected]),
-  {noreply, Pool}.
+handle_cast(Unexpected, Data) ->
+  ?LOGWARNING("received unexpected message: ~p", [Unexpected]),
+  {noreply, Data}.
 
-terminate(_Reason, #data{port = Port}) ->
+terminate(_Reason, #data{port = Port, os_pid = OsPid}) ->
   catch erlang:port_close(Port),
+  kill_os_process(OsPid),
   ok.
 
 %%% +--------------------------------------------------------------+
@@ -196,7 +206,7 @@ wait_port_response(
   receive
     {Port, {data, Binary}} ->
       Term =
-        try erlang:binary_to_term(Binary)
+        try erlang:binary_to_term(Binary, [safe])
         catch _:_ -> {error, invalid_term_received}
         end,
       case Term of
@@ -273,8 +283,10 @@ is_function_exported(_Module, _Function, _Arguments) ->
 collect_port_info(Port) ->
   lists:foldl(
     fun(Key, Acc) ->
-      {Key, Value} = erlang:port_info(Port, Key),
-      Acc#{Key => Value}
+      case erlang:port_info(Port, Key) of
+        {Key, Value} -> Acc#{Key => Value};
+        undefined    -> Acc
+      end
     end,
     #{},
     ?PORT_INFO_KEYS
@@ -291,3 +303,9 @@ reload_libraries(#data{port = Port, timeout = Timeout} = Data, [{Name, Code} | R
     {error, Error} ->
       {error, Error}
   end.
+
+kill_os_process(undefined) ->
+  ok;
+kill_os_process(OsPid) ->
+  os:cmd("kill -15 " ++ erlang:integer_to_list(OsPid)),
+  ok.
