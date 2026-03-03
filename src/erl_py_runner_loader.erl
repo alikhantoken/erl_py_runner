@@ -166,7 +166,7 @@ broadcast(WorkerPIDs, RequestFun) ->
          Ref = make_ref(),
          spawn(
            fun() ->
-             Owner ! {Ref, PID, RequestFun(PID)}
+             Owner ! {broadcast_reply, Ref, PID, RequestFun(PID)}
            end
          ),
          {Ref, PID}
@@ -179,7 +179,7 @@ collect(PendingRefs, Errors, _Deadline) when map_size(PendingRefs) =:= 0 ->
 collect(PendingRefs, Errors, Deadline) ->
   Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
   receive
-    {Ref, _PID, Result} ->
+    {broadcast_reply, Ref, _PID, Result} ->
       case maps:take(Ref, PendingRefs) of
         {ExpectedPID, Rest} ->
           case Result of
