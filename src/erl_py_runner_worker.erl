@@ -255,13 +255,17 @@ handle_callback(
   send_port_command(Port, Response).
 
 send_port_command(Port, Term) ->
-  case erlang:port_command(Port, erlang:term_to_binary(Term), [nosuspend]) of
+  send_port_command(Port, erlang:term_to_binary(Term), _DefaultRetries = 5).
+send_port_command(Port, Term, Retries) when Retries > 0 ->
+  case erlang:port_command(Port, Term, [nosuspend]) of
     true ->
       ok;
     false ->
-      catch erlang:port_close(Port),
-      exit(port_command_aborted)
-  end.
+      send_port_command(Port, Term, Retries - 1)
+  end;
+send_port_command(Port, _Term, _Retries) ->
+  catch erlang:port_close(Port),
+  exit(port_command_aborted).
 
 is_module_allowed(_Module, all) ->
   ok;
