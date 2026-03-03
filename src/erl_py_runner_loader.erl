@@ -133,38 +133,24 @@ terminate(Reason, _State) ->
 %%% +--------------------------------------------------------------+
 
 broadcast_library(WorkerPIDs, Name, Code) ->
-  Owner = self(),
-  ExpectedRefs =
-    [begin
-       Reference = make_ref(),
-       spawn(
-         fun() ->
-           Result =
-             try erl_py_runner_worker:load_library(PID, Name, Code)
-             catch _Class:Error -> {error, {load_failed, Error}}
-             end,
-           Owner ! {Reference, PID, Result}
-         end),
-       {Reference, PID}
-     end || PID <- WorkerPIDs],
-  collect(ExpectedRefs).
+  broadcast(
+    WorkerPIDs,
+    fun(PID) ->
+      try erl_py_runner_worker:load_library(PID, Name, Code)
+      catch _Class:Error -> {error, {load_failed, Error}}
+      end
+    end
+  ).
 
 broadcast_delete(WorkerPIDs, Name) ->
-  Parent = self(),
-  ExpectedRefs =
-    [begin
-       Reference = make_ref(),
-       spawn(
-         fun() ->
-           Result =
-             try erl_py_runner_worker:delete_library(PID, Name)
-             catch _Class:Error -> {error, {delete_failed, Error}}
-             end,
-           Parent ! {Reference, PID, Result}
-         end),
-       {Reference, PID}
-     end || PID <- WorkerPIDs],
-  collect(ExpectedRefs).
+  broadcast(
+    WorkerPIDs,
+    fun(PID) ->
+      try erl_py_runner_worker:delete_library(PID, Name)
+      catch _Class:Error -> {error, {delete_failed, Error}}
+      end
+    end
+  ).
 
 add_library(Name, Code, Libraries) ->
   case lists:keymember(Name, 1, Libraries) of
@@ -172,14 +158,42 @@ add_library(Name, Code, Libraries) ->
     false -> Libraries ++ [{Name, Code}]
   end.
 
-collect(Refs) ->
-  collect(Refs, []).
-collect([], Errors) ->
+broadcast(WorkerPIDs, RequestFun) ->
+  Owner = self(),
+  PendingRefs =
+    maps:from_list(
+      [begin
+         Ref = make_ref(),
+         spawn(
+           fun() ->
+             Owner ! {Ref, PID, RequestFun(PID)}
+           end
+         ),
+         {Ref, PID}
+       end || PID <- WorkerPIDs]
+    ),
+  collect(PendingRefs, [], erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY).
+
+collect(PendingRefs, Errors, _Deadline) when map_size(PendingRefs) =:= 0 ->
   Errors;
-collect([{Ref, PID} | Rest], Errors) ->
+collect(PendingRefs, Errors, Deadline) ->
+  Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
   receive
-    {Ref, PID, ok} -> collect(Rest, Errors);
-    {Ref, PID, {error, Reason}} -> collect(Rest, [{PID, Reason} | Errors])
+    {Ref, _PID, Result} ->
+      case maps:take(Ref, PendingRefs) of
+        {ExpectedPID, Rest} ->
+          case Result of
+            ok ->
+              collect(Rest, Errors, Deadline);
+            {error, Reason} ->
+              collect(Rest, [{ExpectedPID, Reason} | Errors], Deadline);
+            _ ->
+              collect(Rest, [{ExpectedPID, invalid_reply} | Errors], Deadline)
+          end;
+        error ->
+          collect(PendingRefs, Errors, Deadline)
+      end
   after
-    ?TIMEOUT_LOAD_LIBRARY -> collect(Rest, [{PID, timeout} | Errors])
+    Remaining ->
+      maps:fold(fun(_Ref, PID, Acc) -> [{PID, timeout} | Acc] end, Errors, PendingRefs)
   end.
