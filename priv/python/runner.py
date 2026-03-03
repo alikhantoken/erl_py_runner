@@ -59,8 +59,26 @@ _ATOM_INIT: Final[Atom] = Atom("init")
 _ATOM_EXEC: Final[Atom] = Atom("exec")
 _ATOM_CALL: Final[Atom] = Atom("call")
 _ATOM_CALL_REPLY: Final[Atom] = Atom("call_reply")
+_ATOM_LOG: Final[Atom] = Atom("log")
 _ATOM_LOAD_LIBRARY: Final[Atom] = Atom("load_library")
 _ATOM_DELETE_LIBRARY: Final[Atom] = Atom("delete_library")
+
+# Specific logging levels (Erlang Logger)
+_ATOM_DEBUG: Final[Atom] = Atom("debug")
+_ATOM_INFO: Final[Atom] = Atom("info")
+_ATOM_NOTICE: Final[Atom] = Atom("notice")
+_ATOM_WARNING: Final[Atom] = Atom("warning")
+_ATOM_ERROR_LEVEL: Final[Atom] = Atom("error")
+
+# Dictionary of all logging levels available to use for a user
+_LOG_LEVELS: Final[dict[str, Atom]] = {
+    "debug": _ATOM_DEBUG,
+    "info": _ATOM_INFO,
+    "notice": _ATOM_NOTICE,
+    "warning": _ATOM_WARNING,
+    "warn": _ATOM_WARNING,
+    "error": _ATOM_ERROR_LEVEL,
+}
 
 # These module names are prohibited for user libraries.
 _RESERVED_LIBRARY_NAMES: Final[frozenset[str]] = frozenset({
@@ -280,6 +298,26 @@ class ErlangCaller:
             )
 
 
+class ErlangLogger:
+    __slots__ = ("_port",)
+
+    def __init__(self, port: ErlangPort) -> None:
+        self._port = port
+
+    def log(
+        self,
+        level: str,
+        message: Any
+    ) -> None:
+        level_atom = _LOG_LEVELS.get(_to_str(level).lower(), _ATOM_INFO)
+        payload = (_ATOM_LOG, level_atom, message)
+
+        try:
+            self._port.write(payload)
+        except Exception:
+            return
+
+
 # ---------------------------------------------------------------------------
 # Library Storage
 # ---------------------------------------------------------------------------
@@ -408,17 +446,19 @@ class LibraryStorage:
 
 
 class MessageDispatcher:
-    __slots__ = ("_safe_builtins", "_library_storage", "_caller", "_table")
+    __slots__ = ("_safe_builtins", "_library_storage", "_caller", "_logger", "_table")
 
     def __init__(
         self,
         safe_builtins: dict[str, Any],
         library_storage: LibraryStorage,
         caller: ErlangCaller,
+        logger: ErlangLogger,
     ) -> None:
         self._safe_builtins = safe_builtins
         self._library_storage = library_storage
         self._caller = caller
+        self._logger = logger
         self._table: dict[Any, Callable[[Any], Any]] = {
             _ATOM_LOAD_LIBRARY: self._handle_load_library,
             _ATOM_DELETE_LIBRARY: self._handle_delete_library,
@@ -473,6 +513,7 @@ class MessageDispatcher:
             "state": state,
             "result": None,
             "erlang": self._caller,
+            "logger": self._logger,
         }
 
         try:
@@ -535,9 +576,12 @@ class Worker:
                 self._fatal(f"Invalid allowed modules: {exception}", exit_code=1)
 
         safe_builtins = _build_safe_builtins(allowed_modules)
-        caller = ErlangCaller(self._port)
         library_storage = LibraryStorage(safe_builtins)
-        dispatcher = MessageDispatcher(safe_builtins, library_storage, caller)
+
+        caller = ErlangCaller(self._port)
+        logger = ErlangLogger(self._port)
+
+        dispatcher = MessageDispatcher(safe_builtins, library_storage, caller, logger)
 
         self._port.write(_ATOM_OK)
 

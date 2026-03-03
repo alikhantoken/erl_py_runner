@@ -20,6 +20,7 @@
   line => ?LINE
 }).
 
+-define(LOG(Level, Text),        logger:log(Level, Text, ?MFA_METADATA)).
 -define(LOGERROR(Text),          logger:error(Text, [], ?MFA_METADATA)).
 -define(LOGERROR(Text,Params),   logger:error(Text, Params, ?MFA_METADATA)).
 -define(LOGWARNING(Text),        logger:warning(Text, [], ?MFA_METADATA)).

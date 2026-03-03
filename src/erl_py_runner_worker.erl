@@ -227,6 +227,9 @@ wait_port_response(
           ok;
         {ok, {Result, State}} ->
           {ok, Result, State};
+        {log, Level, Message} ->
+          handle_log(Level, Message),
+          wait_port_response(Data, Deadline);
         {call, RequestID, Module, Function, Arguments} ->
           handle_callback(RequestID, Module, Function, Arguments, Data),
           wait_port_response(Data, Deadline);
@@ -266,6 +269,9 @@ handle_callback(
         ?COMMAND_REPLY(RequestID, {error, iolist_to_binary(io_lib:format("~p", [Error]))})
     end,
   send_port_command(Port, Response).
+
+handle_log(Level, Message) ->
+  try ?LOG(Level, Message) catch _:_ -> ok end.
 
 send_port_command(Port, Term) ->
   send_port_command(Port, erlang:term_to_binary(Term), _DefaultRetries = 3).

@@ -22,6 +22,7 @@ all() ->
    {group, state_management},
    {group, python_modules},
    {group, erlang_call_requests},
+   {group, python_logging},
    {group, parallel_execution},
    {group, error_handling},
    {group, edge_cases}].
@@ -80,6 +81,10 @@ groups() ->
     call_no_arguments,
     call_multiple,
     call_result_use
+  ]},
+  {python_logging, [sequence], [
+    python_log_basic,
+    python_log_level
   ]},
   {parallel_execution, [sequence], [
     parallel_basic,
@@ -352,6 +357,18 @@ call_multiple(_Config) ->
 call_result_use(_Config) ->
   Code = <<"reversed = erlang.call('lists', 'reverse', [[1, 2, 3]])\nresult = reversed[0]">>,
   ?assertEqual({ok, [3], undefined}, erl_py_runner:run(Code, #{})).
+
+%%% +--------------------------------------------------------------+
+%%% |                    Group: Python Logging                     |
+%%% +--------------------------------------------------------------+
+
+python_log_basic(_Config) ->
+  Code = <<"logger.log('info', 'hello from python logger')\nresult = 1">>,
+  ?assertEqual({ok, 1, undefined}, erl_py_runner:run(Code, #{})).
+
+python_log_level(_Config) ->
+  Code = <<"logger.log('warning', 'hello from python logger')\nresult = 1">>,
+  ?assertEqual({ok, 1, undefined}, erl_py_runner:run(Code, #{})).
 
 %%% +--------------------------------------------------------------+
 %%% |                  Group: parallel_execution                   |
