@@ -11,13 +11,6 @@
   version_counter
 }).
 
--record(library, {
-  name,
-  code,
-  hash,
-  version
-}).
-
 %% Timeout for broadcasting a library to all existing workers.
 -define(TIMEOUT_LOAD_LIBRARY, 180000).
 -define(TIMEOUT_GET_LIBRARIES, 5000).
@@ -26,5 +19,6 @@
 -define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
 -define(CALL_DELETE_LIBRARY(Name),     {delete_library, Name}).
 -define(CALL_GET_LIBRARIES,            get_libraries).
+-define(CALL_GET_LIBRARIES_META,       get_libraries_meta).
 
 -endif.

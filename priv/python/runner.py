@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import builtins
 import itertools
-import logging
 import struct
 import sys
 import traceback
 import types
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import IO, Any, Final, NoReturn
 
 # REQUIRED IMPORTS FOR ERLANG TERM CONVERSION!
@@ -281,22 +281,86 @@ class ErlangCaller:
 
 
 # ---------------------------------------------------------------------------
-# Library library_storage
+# Library Storage
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _LibraryEntity:
+    hash: bytes
+    version: int
+    loaded: bool
+
+
+def _parse_library_hash(value: Any) -> bytes:
+    if isinstance(value, bytearray):
+        value = bytes(value)
+    if not isinstance(value, bytes):
+        raise ValueError("library hash must be bytes")
+    if len(value) != 32:
+        raise ValueError("library hash size must be 32 bytes")
+
+    return value
+
+
+def _parse_library_version(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be integer")
+    if value < 0:
+        raise ValueError(f"{field} must be >= 0")
+
+    return value
+
+
+def _parse_load_library_message(message: Any) -> tuple[str, str, _LibraryEntity, int]:
+    if not isinstance(message, tuple) or len(message) != 6:
+        raise ValueError("Invalid load library message format")
+
+    _, name, code, library_hash, expected_version, version = message
+
+    return (
+        _to_str(name),
+        _to_str(code),
+        _LibraryEntity(
+            hash=_parse_library_hash(library_hash),
+            version=_parse_library_version(version, "version"),
+            loaded=True,
+        ),
+        _parse_library_version(expected_version, "expected_version"),
+    )
+
+
+def _parse_delete_library_message(message: Any) -> tuple[str, _LibraryEntity, int]:
+    if not isinstance(message, tuple) or len(message) != 5:
+        raise ValueError("Invalid delete library message format")
+
+    _, name, library_hash, expected_version, version = message
+
+    return (
+        _to_str(name),
+        _LibraryEntity(
+            hash=_parse_library_hash(library_hash),
+            version=_parse_library_version(version, "version"),
+            loaded=False,
+        ),
+        _parse_library_version(expected_version, "expected_version"),
+    )
+
+
 class LibraryStorage:
-    __slots__ = ("_safe_builtins", "_loaded")
+    __slots__ = ("_safe_builtins", "_entries")
 
     def __init__(self, safe_builtins: dict[str, Any]) -> None:
         self._safe_builtins = safe_builtins
-        self._loaded: set[str] = set()
+        self._entries: dict[str, _LibraryEntity] = {}
 
-    def load(self, name: str, code: str) -> None:
-        top_level = name.split(".")[0]
+    def load(self, name: str, code: str, target_entry: _LibraryEntity, expected_version: int) -> None:
+        self._check_name(name)
+        current_entry = self._entries.get(name)
+        if current_entry == target_entry:
+            return
 
-        if name in _RESERVED_LIBRARY_NAMES or top_level in _RESERVED_LIBRARY_NAMES:
-            raise ValueError(f"Reserved library name: {name!r}")
+        self._check_version(name, current_entry, expected_version)
 
         module = types.ModuleType(name)
         module.__dict__["__builtins__"] = self._safe_builtins
@@ -307,13 +371,35 @@ class LibraryStorage:
             raise ValueError("SystemExit is not allowed in library code") from exception
 
         sys.modules[name] = module
-        self._loaded.add(name)
+        self._entries[name] = target_entry
 
-    def delete(self, name: str) -> None:
-        if name not in self._loaded:
+    def delete(self, name: str, target_entry: _LibraryEntity, expected_version: int) -> None:
+        current_entry = self._entries.get(name)
+        if current_entry == target_entry:
+            return
+
+        self._check_version(name, current_entry, expected_version)
+
+        if current_entry is None or not current_entry.loaded:
             raise KeyError(name)
-        self._loaded.discard(name)
+
         sys.modules.pop(name, None)
+        self._entries[name] = target_entry
+
+    @staticmethod
+    def _check_name(name: str) -> None:
+        top_level = name.split(".")[0]
+        if name in _RESERVED_LIBRARY_NAMES or top_level in _RESERVED_LIBRARY_NAMES:
+            raise ValueError(f"Reserved library name: {name!r}")
+
+    @staticmethod
+    def _check_version(name: str, entry: _LibraryEntity | None, expected_version: int) -> None:
+        current_version = 0 if entry is None else entry.version
+        if current_version != expected_version:
+            raise ValueError(
+                f"Library version mismatch for {name!r}: "
+                f"expected {expected_version}, current {current_version}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -349,13 +435,9 @@ class MessageDispatcher:
     # ------------------------------------------------------------------
 
     def _handle_load_library(self, message: Any) -> Any:
-        if not isinstance(message, tuple) or len(message) != 3:
-            return _error_response("Invalid load library message format")
-
-        _, name, code = message
-
         try:
-            self._library_storage.load(_to_str(name), _to_str(code))
+            name, code, target_entry, expected_version = _parse_load_library_message(message)
+            self._library_storage.load(name, code, target_entry, expected_version)
         except ValueError as exception:
             return _error_response(str(exception))
         except Exception as exception:
@@ -366,15 +448,17 @@ class MessageDispatcher:
         return _ATOM_OK
 
     def _handle_delete_library(self, message: Any) -> Any:
-        if not isinstance(message, tuple) or len(message) != 2:
-            return _error_response("Invalid delete library message format")
-
-        _, name = message
-
         try:
-            self._library_storage.delete(_to_str(name))
+            name, target_entry, expected_version = _parse_delete_library_message(message)
+            self._library_storage.delete(name, target_entry, expected_version)
         except KeyError:
             return _error_response("Library not loaded")
+        except ValueError as exception:
+            return _error_response(str(exception))
+        except Exception as exception:
+            return _error_response(
+                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
+            )
         return _ATOM_OK
 
     def _handle_exec(self, message: Any) -> Any:
@@ -383,7 +467,8 @@ class MessageDispatcher:
 
         _, code, arguments, state = message
 
-        local_vars: dict[str, Any] = {
+        namespace: dict[str, Any] = {
+            "__builtins__": self._safe_builtins,
             "arguments": arguments,
             "state": state,
             "result": None,
@@ -391,13 +476,8 @@ class MessageDispatcher:
         }
 
         try:
-            exec_globals = {"__builtins__": self._safe_builtins, **local_vars}
-            exec(
-                _to_str(code),
-                exec_globals,
-            )
-            local_vars = exec_globals
-            return _ok_response((local_vars.get("result"), local_vars.get("state")))
+            exec(_to_str(code), namespace)
+            return _ok_response((namespace.get("result"), namespace.get("state")))
         except SystemExit:
             return _error_response("SystemExit is not allowed")
         except Exception as exception:
@@ -405,7 +485,8 @@ class MessageDispatcher:
                 f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
             )
 
-    def _handle_unknown(self, message: Any) -> Any:
+    @staticmethod
+    def _handle_unknown(message: Any) -> Any:
         return _error_response(f"Unknown message tag: {message!r}")
 
 

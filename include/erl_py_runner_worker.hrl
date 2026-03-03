@@ -20,13 +20,15 @@
 -define(COMMAND_EXECUTE(Code, Arguments, State), {exec, Code, Arguments, State}).
 -define(COMMAND_INIT(Modules), {init, Modules}).
 -define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
--define(COMMAND_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
--define(COMMAND_DELETE_LIBRARY(Name), {delete_library, Name}).
+-define(COMMAND_LOAD_LIBRARY(Name, Code, Hash, ExpectedVersion, Version),
+  {load_library, Name, Code, Hash, ExpectedVersion, Version}).
+-define(COMMAND_DELETE_LIBRARY(Name, Hash, ExpectedVersion, Version),
+  {delete_library, Name, Hash, ExpectedVersion, Version}).
 
 %% Gen server call requests.
--define(CALL_RUN(Code, Arguments, State), {run, Code, Arguments, State}).
--define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
--define(CALL_DELETE_LIBRARY(Name), {delete_library, Name}).
+-define(CALL_RUN(Code, Arguments, State, Deadline), {run, Code, Arguments, State, Deadline}).
+-define(CALL_LOAD_LIBRARY(Library, ExpectedVersion), {load_library, Library, ExpectedVersion}).
+-define(CALL_DELETE_LIBRARY(Library, ExpectedVersion), {delete_library, Library, ExpectedVersion}).
 -define(CALL_INFO, info).
 
 %% Timeouts for each API public function.

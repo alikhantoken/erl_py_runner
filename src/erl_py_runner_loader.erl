@@ -17,7 +17,8 @@
   start_link/0,
   load_library/2,
   delete_library/1,
-  get_libraries/0
+  get_libraries/0,
+  get_libraries_meta/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -53,6 +54,9 @@ delete_library(Name) ->
 get_libraries() ->
   gen_server:call(?MODULE, ?CALL_GET_LIBRARIES, ?TIMEOUT_GET_LIBRARIES).
 
+get_libraries_meta() ->
+  gen_server:call(?MODULE, ?CALL_GET_LIBRARIES_META, ?TIMEOUT_GET_LIBRARIES).
+
 %%% +--------------------------------------------------------------+
 %%% |                     Gen Server Callbacks                     |
 %%% +--------------------------------------------------------------+
@@ -84,13 +88,14 @@ handle_call(
 handle_call(
   ?CALL_DELETE_LIBRARY(Name),
   _Caller,
-  #loader{libraries = Libraries} = State
+  #loader{libraries = Libraries, version_counter = VersionCounter} = State
 ) ->
   WorkerPIDs = erl_py_runner_pool:get_workers(),
-  case do_delete_library(WorkerPIDs, Name, Libraries) of
-    {ok, NewLibraries} ->
+  case do_delete_library(WorkerPIDs, Name, Libraries, VersionCounter) of
+    {ok, NewLibraries, NewVersionCounter} ->
       {reply, ok, State#loader{
-        libraries = NewLibraries
+        libraries = NewLibraries,
+        version_counter = NewVersionCounter
       }};
     {error, not_found} ->
       {reply, {error, not_found}, State};
@@ -108,6 +113,22 @@ handle_call(
   } = State
 ) ->
   Result = [{Name, Code} || #library{name = Name, code = Code} <- Libraries],
+  {reply, {ok, Result}, State};
+
+handle_call(
+  ?CALL_GET_LIBRARIES_META,
+  _Caller,
+  #loader{
+    libraries = Libraries
+  } = State
+) ->
+  Result =
+    [{Name, Code, Hash, Version} || #library{
+      name = Name,
+      code = Code,
+      hash = Hash,
+      version = Version
+    } <- Libraries],
   {reply, {ok, Result}, State};
 
 handle_call(Unexpected, _From, State) ->
@@ -131,13 +152,18 @@ terminate(Reason, _State) ->
 %%% +--------------------------------------------------------------+
 
 do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) ->
-  Deadline = erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
-  case broadcast_library(WorkerPIDs, Name, Code, Deadline) of
+  {Library, ExpectedVersion, NewVersionCounter} =
+    prepare_library(Name, Code, Libraries, VersionCounter),
+  Deadline =
+    erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
+  case broadcast_library(WorkerPIDs, Library, ExpectedVersion, Deadline) of
     {_, []} ->
-      {NewLibraries, NewVersionCounter} = insert_library(Name, Code, Libraries, VersionCounter),
-      {ok, NewLibraries, NewVersionCounter};
+      ?LOGINFO("successfully loaded library ~ts on ~p workers", [Name, length(WorkerPIDs)]),
+      {ok, insert_library(Library, Libraries), NewVersionCounter};
     {SuccessfulPIDs, BroadcastErrors} ->
-      case rollback_library(SuccessfulPIDs, Name, Libraries, Deadline) of
+      ?LOGWARNING("failed to load library ~ts on ~p workers, errors: ~p, rolling back ~p workers",
+                  [Name, length(WorkerPIDs), BroadcastErrors, length(SuccessfulPIDs)]),
+      case rollback_library(SuccessfulPIDs, Library, Libraries, Deadline) of
         [] ->
           {error, BroadcastErrors};
         RollbackErrors ->
@@ -145,17 +171,34 @@ do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) ->
       end
   end.
 
-do_delete_library(WorkerPIDs, Name, Libraries) ->
+do_delete_library(WorkerPIDs, Name, Libraries, VersionCounter) ->
   Deadline = erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
   case lists:keyfind(Name, #library.name, Libraries) of
     false ->
       {error, not_found};
-    #library{code = Code} ->
-      case broadcast_delete(WorkerPIDs, Name, Deadline) of
+    #library{hash = Hash, version = CurrentVersion} = Library ->
+      DeleteVersion = VersionCounter + 1,
+      DeleteLibrary =
+        #library{
+          name = Name,
+          hash = Hash,
+          version = DeleteVersion
+        },
+      case broadcast_delete(WorkerPIDs, DeleteLibrary, CurrentVersion, Deadline) of
         {_, []} ->
-          {ok, lists:keydelete(Name, #library.name, Libraries)};
+          ?LOGINFO("successfully deleted library ~ts from ~p workers", [
+            Name,
+            length(WorkerPIDs)
+          ]),
+          {ok, lists:keydelete(Name, #library.name, Libraries), DeleteVersion};
         {SuccessfulPIDs, DeleteErrors} ->
-          case rollback_delete(SuccessfulPIDs, Name, Code, Deadline) of
+          ?LOGWARNING("failed to delete library ~ts on ~p workers, errors: ~p, rolling back ~p workers", [
+            Name,
+            length(WorkerPIDs),
+            DeleteErrors,
+            length(SuccessfulPIDs)
+          ]),
+          case rollback_delete(SuccessfulPIDs, Library, DeleteVersion, Deadline) of
             [] ->
               {error, DeleteErrors};
             RollbackErrors ->
@@ -164,72 +207,83 @@ do_delete_library(WorkerPIDs, Name, Libraries) ->
       end
   end.
 
-insert_library(Name, Code, Libraries, VersionCounter) ->
+prepare_library(Name, Code, Libraries, VersionCounter) ->
   Hash = crypto:hash(sha256, Code),
   case lists:keyfind(Name, #library.name, Libraries) of
     #library{hash = Hash, version = Version} ->
-      UpdatedLibrary = #library{
-        name = Name,
-        code = Code,
-        hash = Hash,
-        version = Version
-      },
-      {lists:keyreplace(Name, #library.name, Libraries, UpdatedLibrary), VersionCounter};
-    #library{} ->
+      UpdatedLibrary =
+        #library{
+          name = Name,
+          code = Code,
+          hash = Hash,
+          version = Version
+        },
+      {UpdatedLibrary, Version, VersionCounter};
+    #library{version = Version} ->
       NewVersion = VersionCounter + 1,
-      UpdatedLibrary = #library{
-        name = Name,
-        code = Code,
-        hash = Hash,
-        version = NewVersion
-      },
-      {lists:keyreplace(Name, #library.name, Libraries, UpdatedLibrary), NewVersion};
+      UpdatedLibrary =
+        #library{
+          name = Name,
+          code = Code,
+          hash = Hash,
+          version = NewVersion
+        },
+      {UpdatedLibrary, Version, NewVersion};
     false ->
       NewVersion = VersionCounter + 1,
-      NewLibrary = #library{
-        name = Name,
-        code = Code,
-        hash = Hash,
-        version = NewVersion
-      },
-      % Maintain insert order of libraries
-      {Libraries ++ [NewLibrary], NewVersion}
+      UpdatedLibrary =
+        #library{
+          name = Name,
+          code = Code,
+          hash = Hash,
+          version = NewVersion
+        },
+      {UpdatedLibrary, _Initial = 0, NewVersion}
   end.
 
-rollback_library([], _Name, _Libraries, _Deadline) ->
+insert_library(#library{name = Name} = Library, Libraries) ->
+  lists:keystore(Name, #library.name, Libraries, Library).
+
+rollback_library([], _Library, _Libraries, _Deadline) ->
   [];
-rollback_library(SuccessfulPIDs, Name, Libraries, Deadline) ->
+rollback_library(
+  SuccessfulPIDs,
+  #library{name = Name, hash = Hash, version = Version},
+  Libraries,
+  Deadline
+) ->
   case lists:keyfind(Name, #library.name, Libraries) of
-    #library{code = PreviousCode} ->
-      {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Name, PreviousCode, Deadline),
+    #library{} = PreviousLibrary ->
+      {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, PreviousLibrary, Version, Deadline),
       RollbackErrors;
     false ->
-      {_, RollbackErrors} = broadcast_delete(SuccessfulPIDs, Name, Deadline),
+      RollbackLibrary = #library{name = Name, hash = Hash, version = 0},
+      {_, RollbackErrors} = broadcast_delete(SuccessfulPIDs, RollbackLibrary, Version, Deadline),
       RollbackErrors
   end.
 
-rollback_delete([], _Name, _Code, _Deadline) ->
+rollback_delete([], _Library, _DeleteVersion, _Deadline) ->
   [];
-rollback_delete(SuccessfulPIDs, Name, Code, Deadline) ->
-  {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Name, Code, Deadline),
+rollback_delete(SuccessfulPIDs, #library{} = Library, DeleteVersion, Deadline) ->
+  {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Library, DeleteVersion, Deadline),
   RollbackErrors.
 
-broadcast_library(WorkerPIDs, Name, Code, Deadline) ->
+broadcast_library(WorkerPIDs, #library{} = Library, ExpectedVersion, Deadline) ->
   broadcast(
     WorkerPIDs,
     fun(PID) ->
-      try erl_py_runner_worker:load_library(PID, Name, Code)
+      try erl_py_runner_worker:load_library(PID, Library, ExpectedVersion)
       catch _Class:Error -> {error, {load_failed, Error}}
       end
     end,
     Deadline
   ).
 
-broadcast_delete(WorkerPIDs, Name, Deadline) ->
+broadcast_delete(WorkerPIDs, #library{} = Library, ExpectedVersion, Deadline) ->
   broadcast(
     WorkerPIDs,
     fun(PID) ->
-      try erl_py_runner_worker:delete_library(PID, Name)
+      try erl_py_runner_worker:delete_library(PID, Library, ExpectedVersion)
       catch _Class:Error -> {error, {delete_failed, Error}}
       end
     end,
