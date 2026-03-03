@@ -59,25 +59,26 @@ get_libraries() ->
 
 init([]) ->
   {ok, #loader{
-    libraries = []
+    libraries = [],
+    version_counter = 0
   }}.
 
 handle_call(
   ?CALL_LOAD_LIBRARY(Name, Code),
   _Caller,
-  #loader{libraries = Libraries} = State
+  #loader{libraries = Libraries, version_counter = VersionCounter} = State
 ) ->
   WorkerPIDs = erl_py_runner_pool:get_workers(),
-  case broadcast_library(WorkerPIDs, Name, Code) of
-    [] ->
-      NewLibraries = add_library(Name, Code, Libraries),
-      ?LOGINFO("successfully loaded library ~ts from ~p workers", [Name, length(WorkerPIDs)]),
+  case do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) of
+    {ok, NewLibraries, NewVersionCounter} ->
       {reply, ok, State#loader{
-        libraries = NewLibraries
+        libraries = NewLibraries,
+        version_counter = NewVersionCounter
       }};
-    Errors ->
-      ?LOGERROR("failed to load library ~ts on workers: ~p", [Name, Errors]),
-      {reply, {error, Errors}, State}
+    {error, BroadcastErrors} ->
+      {reply, {error, BroadcastErrors}, State};
+    {error, BroadcastErrors, RollbackErrors} ->
+      {reply, {error, {broadcast_failed, BroadcastErrors, rollback_failed, RollbackErrors}}, State}
   end;
 
 handle_call(
@@ -85,22 +86,18 @@ handle_call(
   _Caller,
   #loader{libraries = Libraries} = State
 ) ->
-  case lists:keymember(Name, 1, Libraries) of
-    false ->
+  WorkerPIDs = erl_py_runner_pool:get_workers(),
+  case do_delete_library(WorkerPIDs, Name, Libraries) of
+    {ok, NewLibraries} ->
+      {reply, ok, State#loader{
+        libraries = NewLibraries
+      }};
+    {error, not_found} ->
       {reply, {error, not_found}, State};
-    true ->
-      WorkerPIDs = erl_py_runner_pool:get_workers(),
-      case broadcast_delete(WorkerPIDs, Name) of
-        [] ->
-          NewLibraries = lists:keydelete(Name, 1, Libraries),
-          ?LOGINFO("successfully deleted library ~ts from ~p workers", [Name, length(WorkerPIDs)]),
-          {reply, ok, State#loader{
-            libraries = NewLibraries
-          }};
-        Errors ->
-          ?LOGERROR("failed to delete library ~ts on workers: ~p", [Name, Errors]),
-          {reply, {error, Errors}, State}
-      end
+    {error, DeleteErrors} ->
+      {reply, {error, DeleteErrors}, State};
+    {error, DeleteErrors, RollbackErrors} ->
+      {reply, {error, {broadcast_failed, DeleteErrors, rollback_failed, RollbackErrors}}, State}
   end;
 
 handle_call(
@@ -110,7 +107,8 @@ handle_call(
     libraries = Libraries
   } = State
 ) ->
-  {reply, {ok, Libraries}, State};
+  Result = [{Name, Code} || #library{name = Name, code = Code} <- Libraries],
+  {reply, {ok, Result}, State};
 
 handle_call(Unexpected, _From, State) ->
   ?LOGWARNING("received unexpected message: ~p", [Unexpected]),
@@ -132,33 +130,113 @@ terminate(Reason, _State) ->
 %%% |                       Internal Functions                     |
 %%% +--------------------------------------------------------------+
 
-broadcast_library(WorkerPIDs, Name, Code) ->
+do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) ->
+  Deadline = erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
+  case broadcast_library(WorkerPIDs, Name, Code, Deadline) of
+    {_, []} ->
+      {NewLibraries, NewVersionCounter} = insert_library(Name, Code, Libraries, VersionCounter),
+      {ok, NewLibraries, NewVersionCounter};
+    {SuccessfulPIDs, BroadcastErrors} ->
+      case rollback_library(SuccessfulPIDs, Name, Libraries, Deadline) of
+        [] ->
+          {error, BroadcastErrors};
+        RollbackErrors ->
+          {error, BroadcastErrors, RollbackErrors}
+      end
+  end.
+
+do_delete_library(WorkerPIDs, Name, Libraries) ->
+  Deadline = erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
+  case lists:keyfind(Name, #library.name, Libraries) of
+    false ->
+      {error, not_found};
+    #library{code = Code} ->
+      case broadcast_delete(WorkerPIDs, Name, Deadline) of
+        {_, []} ->
+          {ok, lists:keydelete(Name, #library.name, Libraries)};
+        {SuccessfulPIDs, DeleteErrors} ->
+          case rollback_delete(SuccessfulPIDs, Name, Code, Deadline) of
+            [] ->
+              {error, DeleteErrors};
+            RollbackErrors ->
+              {error, DeleteErrors, RollbackErrors}
+          end
+      end
+  end.
+
+insert_library(Name, Code, Libraries, VersionCounter) ->
+  Hash = crypto:hash(sha256, Code),
+  case lists:keyfind(Name, #library.name, Libraries) of
+    #library{hash = Hash, version = Version} ->
+      UpdatedLibrary = #library{
+        name = Name,
+        code = Code,
+        hash = Hash,
+        version = Version
+      },
+      {lists:keyreplace(Name, #library.name, Libraries, UpdatedLibrary), VersionCounter};
+    #library{} ->
+      NewVersion = VersionCounter + 1,
+      UpdatedLibrary = #library{
+        name = Name,
+        code = Code,
+        hash = Hash,
+        version = NewVersion
+      },
+      {lists:keyreplace(Name, #library.name, Libraries, UpdatedLibrary), NewVersion};
+    false ->
+      NewVersion = VersionCounter + 1,
+      NewLibrary = #library{
+        name = Name,
+        code = Code,
+        hash = Hash,
+        version = NewVersion
+      },
+      % Maintain insert order of libraries
+      {Libraries ++ [NewLibrary], NewVersion}
+  end.
+
+rollback_library([], _Name, _Libraries, _Deadline) ->
+  [];
+rollback_library(SuccessfulPIDs, Name, Libraries, Deadline) ->
+  case lists:keyfind(Name, #library.name, Libraries) of
+    #library{code = PreviousCode} ->
+      {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Name, PreviousCode, Deadline),
+      RollbackErrors;
+    false ->
+      {_, RollbackErrors} = broadcast_delete(SuccessfulPIDs, Name, Deadline),
+      RollbackErrors
+  end.
+
+rollback_delete([], _Name, _Code, _Deadline) ->
+  [];
+rollback_delete(SuccessfulPIDs, Name, Code, Deadline) ->
+  {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Name, Code, Deadline),
+  RollbackErrors.
+
+broadcast_library(WorkerPIDs, Name, Code, Deadline) ->
   broadcast(
     WorkerPIDs,
     fun(PID) ->
       try erl_py_runner_worker:load_library(PID, Name, Code)
       catch _Class:Error -> {error, {load_failed, Error}}
       end
-    end
+    end,
+    Deadline
   ).
 
-broadcast_delete(WorkerPIDs, Name) ->
+broadcast_delete(WorkerPIDs, Name, Deadline) ->
   broadcast(
     WorkerPIDs,
     fun(PID) ->
       try erl_py_runner_worker:delete_library(PID, Name)
       catch _Class:Error -> {error, {delete_failed, Error}}
       end
-    end
+    end,
+    Deadline
   ).
 
-add_library(Name, Code, Libraries) ->
-  case lists:keymember(Name, 1, Libraries) of
-    true -> lists:keyreplace(Name, 1, Libraries, {Name, Code});
-    false -> Libraries ++ [{Name, Code}]
-  end.
-
-broadcast(WorkerPIDs, RequestFun) ->
+broadcast(WorkerPIDs, RequestFun, Deadline) ->
   Owner = self(),
   PendingRefs =
     maps:from_list(
@@ -172,28 +250,29 @@ broadcast(WorkerPIDs, RequestFun) ->
          {Ref, PID}
        end || PID <- WorkerPIDs]
     ),
-  collect(PendingRefs, [], erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY).
+  collect(PendingRefs, [], [], Deadline).
 
-collect(PendingRefs, Errors, _Deadline) when map_size(PendingRefs) =:= 0 ->
-  Errors;
-collect(PendingRefs, Errors, Deadline) ->
-  Remaining = max(0, Deadline - erlang:monotonic_time(millisecond)),
+collect(PendingRefs, SuccessfulPIDs, Errors, _Deadline) when map_size(PendingRefs) =:= 0 ->
+  {SuccessfulPIDs, Errors};
+collect(PendingRefs, SuccessfulPIDs, Errors, Deadline) ->
+  Remaining = erlang:max(0, Deadline - erlang:monotonic_time(millisecond)),
   receive
     {broadcast_reply, Ref, _PID, Result} ->
       case maps:take(Ref, PendingRefs) of
         {ExpectedPID, Rest} ->
           case Result of
             ok ->
-              collect(Rest, Errors, Deadline);
+              collect(Rest, [ExpectedPID | SuccessfulPIDs], Errors, Deadline);
             {error, Reason} ->
-              collect(Rest, [{ExpectedPID, Reason} | Errors], Deadline);
+              collect(Rest, SuccessfulPIDs, [{ExpectedPID, Reason} | Errors], Deadline);
             _ ->
-              collect(Rest, [{ExpectedPID, invalid_reply} | Errors], Deadline)
+              collect(Rest, SuccessfulPIDs, [{ExpectedPID, invalid_reply} | Errors], Deadline)
           end;
         error ->
-          collect(PendingRefs, Errors, Deadline)
+          collect(PendingRefs, SuccessfulPIDs, Errors, Deadline)
       end
   after
     Remaining ->
-      maps:fold(fun(_Ref, PID, Acc) -> [{PID, timeout} | Acc] end, Errors, PendingRefs)
+      TimeoutErrors = maps:fold(fun(_Ref, PID, Acc) -> [{PID, timeout} | Acc] end, Errors, PendingRefs),
+      {SuccessfulPIDs, TimeoutErrors}
   end.
