@@ -18,7 +18,7 @@
 
 %% Available commands that are used to communicate with python.
 -define(COMMAND_EXECUTE(Code, Arguments, State), {exec, Code, Arguments, State}).
--define(COMMAND_INIT(Modules), {init, Modules}).
+-define(COMMAND_INIT(Options), {init, Options}).
 -define(COMMAND_REPLY(RequestID, Reply), {call_reply, RequestID, Reply}).
 -define(COMMAND_LOAD_LIBRARY(Name, Code, Hash, ExpectedVersion, Version),
   {load_library, Name, Code, Hash, ExpectedVersion, Version}).

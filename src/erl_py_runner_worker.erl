@@ -115,7 +115,7 @@ init(#{
           _Other -> #{}
         end
     },
-  ok = handshake(Data, AllowedPythonModules),
+  ok = handshake(Data, #{modules => AllowedPythonModules}),
   {ok, Libraries} = erl_py_runner_loader:get_libraries_meta(),
   case reload_libraries(Data, Libraries) of
     ok ->
@@ -201,9 +201,9 @@ handshake(
     port = Port,
     timeout = Timeout
   } = Data,
-  AllowedPythonModules
+  Options
 ) ->
-  send_port_command(Port, ?COMMAND_INIT(AllowedPythonModules)),
+  send_port_command(Port, ?COMMAND_INIT(Options)),
   Deadline = ?MONOTONIC_MS + Timeout,
   case wait_port_response(Data, Deadline) of
     ok -> ok;

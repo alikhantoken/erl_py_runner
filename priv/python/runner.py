@@ -2,9 +2,8 @@
 """Erlang port process that executes sandboxed Python code.
 
 Communicates via stdin/stdout using 4-byte length-prefixed ETF messages.
-Receives an ``init`` handshake with an allowed-modules whitelist, then
-enters a loop: reads code-execution requests, runs them via ``exec()``,
-and returns results.
+Receives an ``init`` handshake with an options map, then enters a loop:
+reads code-execution requests, runs them via ``exec()``, and returns results.
 
 Exit codes:
     0 = normal end of file (EOF)
@@ -20,11 +19,13 @@ Exit codes:
 from __future__ import annotations
 
 import builtins
-import itertools
+import functools
+import gc
 import struct
 import sys
 import traceback
 import types
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import IO, Any, Final, NoReturn
@@ -53,52 +54,55 @@ _MAX_MESSAGE_SIZE: Final[int] = 10 * 1024 * 1024
 _DRAIN_CHUNK_SIZE: Final[int] = 65_536
 _HEADER_STRUCT: Final[struct.Struct] = struct.Struct("!I")
 
-_ATOM_OK: Final[Atom] = Atom("ok")
-_ATOM_ERROR: Final[Atom] = Atom("error")
-_ATOM_INIT: Final[Atom] = Atom("init")
-_ATOM_EXEC: Final[Atom] = Atom("exec")
-_ATOM_CALL: Final[Atom] = Atom("call")
-_ATOM_CALL_REPLY: Final[Atom] = Atom("call_reply")
-_ATOM_LOG: Final[Atom] = Atom("log")
-_ATOM_LOAD_LIBRARY: Final[Atom] = Atom("load_library")
+_ATOM_OK:             Final[Atom] = Atom("ok")
+_ATOM_ERROR:          Final[Atom] = Atom("error")
+_ATOM_INIT:           Final[Atom] = Atom("init")
+_ATOM_EXEC:           Final[Atom] = Atom("exec")
+_ATOM_CALL:           Final[Atom] = Atom("call")
+_ATOM_CALL_REPLY:     Final[Atom] = Atom("call_reply")
+_ATOM_LOG:            Final[Atom] = Atom("log")
+_ATOM_LOAD_LIBRARY:   Final[Atom] = Atom("load_library")
 _ATOM_DELETE_LIBRARY: Final[Atom] = Atom("delete_library")
 
-# Specific logging levels (Erlang Logger)
-_ATOM_DEBUG: Final[Atom] = Atom("debug")
-_ATOM_INFO: Final[Atom] = Atom("info")
-_ATOM_NOTICE: Final[Atom] = Atom("notice")
-_ATOM_WARNING: Final[Atom] = Atom("warning")
-_ATOM_ERROR_LEVEL: Final[Atom] = Atom("error")
-
-# Dictionary of all logging levels available to use for a user
-_LOG_LEVELS: Final[dict[str, Atom]] = {
-    "debug": _ATOM_DEBUG,
-    "info": _ATOM_INFO,
-    "notice": _ATOM_NOTICE,
-    "warning": _ATOM_WARNING,
-    "warn": _ATOM_WARNING,
-    "error": _ATOM_ERROR_LEVEL,
-}
+_ATOM_ALL:         Final[Atom] = Atom("all")
+_ATOM_MODULES:     Final[Atom] = Atom("modules")
+_ATOM_CACHE_SIZE:  Final[Atom] = Atom("cache_size")
+_ATOM_GC_INTERVAL: Final[Atom] = Atom("gc_interval")
 
 # These module names are prohibited for user libraries.
 _RESERVED_LIBRARY_NAMES: Final[frozenset[str]] = frozenset({
     "sys", "builtins", "term", "codec", "types", "erl_py_runner",
 })
 
+# Value range for Erlang ETF INTEGER_EXT
+# https://www.erlang.org/doc/apps/erts/erl_ext_dist.html#integer_ext
+_MAX_REQUEST_ID: Final[int] = (1 << 31) - 1
+
+# Maximum entry count for LRU CACHE
+# https://docs.python.org/3/library/functools.html
+_DEFAULT_CACHE_SIZE:  Final[int] = 512
+
+# Default execution count for GC SWEEP
+_DEFAULT_GC_INTERVAL: Final[int] = 128
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
 
 
-class MessageEOF(Exception):
+class ProtocolError(Exception):
+    """Base for all erlang-python communication protocol errors."""
+
+
+class MessageEOF(ProtocolError):
     """Raised when stdin is closed - EOF."""
 
 
-class MessageOversized(Exception):
+class MessageOversized(ProtocolError):
     """Raised when a declared message length exceeds _MAX_MESSAGE_SIZE."""
 
 
-class MessageTruncated(Exception):
+class MessageTruncated(ProtocolError):
     """Raised when fewer bytes arrive than declared."""
 
 
@@ -191,16 +195,7 @@ class ErlangPort:
         self._writer = writer
 
     def read(self) -> Any:
-        header = self._reader.read(_HEADER_STRUCT.size)
-
-        if len(header) == 0:
-            raise MessageEOF("stdin closed")
-
-        if len(header) < _HEADER_STRUCT.size:
-            raise MessageTruncated(
-                f"Expected {_HEADER_STRUCT.size}-byte header, got {len(header)} bytes"
-            )
-
+        header = self._read_exact(_HEADER_STRUCT.size)
         (length,) = _HEADER_STRUCT.unpack(header)
 
         if length > _MAX_MESSAGE_SIZE:
@@ -209,20 +204,31 @@ class ErlangPort:
                 f"Message size {length} exceeds limit {_MAX_MESSAGE_SIZE}"
             )
 
-        payload = self._reader.read(length)
-        if len(payload) < length:
-            raise MessageTruncated(
-                f"Expected {length} bytes, got {len(payload)}"
-            )
-
+        payload = self._read_exact(length)
         term, _ = codec.binary_to_term(payload)
 
         return term
 
     def write(self, data: Any) -> None:
         payload = codec.term_to_binary(data)
-        self._writer.write(_HEADER_STRUCT.pack(len(payload)) + payload)
+        self._writer.write(_HEADER_STRUCT.pack(len(payload)))
+        self._writer.write(payload)
         self._writer.flush()
+
+    def _read_exact(self, n: int) -> bytes:
+        data = self._reader.read(n)
+        if not data:
+            raise MessageEOF("stdin closed")
+
+        while len(data) < n:
+            chunk = self._reader.read(n - len(data))
+            if not chunk:
+                raise MessageTruncated(
+                    f"Expected {n} bytes, got {len(data)}"
+                )
+            data += chunk
+
+        return data
 
     def _drain(self, length: int) -> None:
         remaining = length
@@ -239,11 +245,11 @@ class ErlangPort:
 
 
 class ErlangCaller:
-    __slots__ = ("_port", "_ids")
+    __slots__ = ("_port", "_next_id")
 
     def __init__(self, port: ErlangPort) -> None:
         self._port = port
-        self._ids = itertools.count(1)
+        self._next_id: int = 1
 
     def call(
         self,
@@ -252,7 +258,8 @@ class ErlangCaller:
         arguments: list[Any] | None = None,
     ) -> Any:
         """Call `Module:Function(Arguments)` in Erlang Worker Process."""
-        request_id = next(self._ids)
+        request_id = self._next_id
+        self._next_id = self._next_id % _MAX_REQUEST_ID + 1
 
         self._port.write((
             _ATOM_CALL,
@@ -264,7 +271,7 @@ class ErlangCaller:
 
         try:
             response = self._port.read()
-        except (MessageEOF, MessageOversized, MessageTruncated) as exception:
+        except ProtocolError as exception:
             raise ErlangPortError(
                 f"Lost connection to Erlang port: {exception}", "port_error"
             ) from exception
@@ -299,6 +306,15 @@ class ErlangCaller:
 
 
 class ErlangLogger:
+    _LEVELS: Final[dict[str, Atom]] = {
+        "debug":   Atom("debug"),
+        "info":    Atom("info"),
+        "notice":  Atom("notice"),
+        "warning": Atom("warning"),
+        "warn":    Atom("warning"),
+        "error":   Atom("error"),
+    }
+
     __slots__ = ("_port",)
 
     def __init__(self, port: ErlangPort) -> None:
@@ -309,7 +325,7 @@ class ErlangLogger:
         level: str,
         message: Any
     ) -> None:
-        level_atom = _LOG_LEVELS.get(_to_str(level).lower(), _ATOM_INFO)
+        level_atom = self._LEVELS.get(_to_str(level).lower(), Atom("info"))
         payload = (_ATOM_LOG, level_atom, message)
 
         try:
@@ -328,61 +344,6 @@ class _LibraryEntity:
     hash: bytes
     version: int
     loaded: bool
-
-
-def _parse_library_hash(value: Any) -> bytes:
-    if isinstance(value, bytearray):
-        value = bytes(value)
-    if not isinstance(value, bytes):
-        raise ValueError("library hash must be bytes")
-    if len(value) != 32:
-        raise ValueError("library hash size must be 32 bytes")
-
-    return value
-
-
-def _parse_library_version(value: Any, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{field} must be integer")
-    if value < 0:
-        raise ValueError(f"{field} must be >= 0")
-
-    return value
-
-
-def _parse_load_library_message(message: Any) -> tuple[str, str, _LibraryEntity, int]:
-    if not isinstance(message, tuple) or len(message) != 6:
-        raise ValueError("Invalid load library message format")
-
-    _, name, code, library_hash, expected_version, version = message
-
-    return (
-        _to_str(name),
-        _to_str(code),
-        _LibraryEntity(
-            hash=_parse_library_hash(library_hash),
-            version=_parse_library_version(version, "version"),
-            loaded=True,
-        ),
-        _parse_library_version(expected_version, "expected_version"),
-    )
-
-
-def _parse_delete_library_message(message: Any) -> tuple[str, _LibraryEntity, int]:
-    if not isinstance(message, tuple) or len(message) != 5:
-        raise ValueError("Invalid delete library message format")
-
-    _, name, library_hash, expected_version, version = message
-
-    return (
-        _to_str(name),
-        _LibraryEntity(
-            hash=_parse_library_hash(library_hash),
-            version=_parse_library_version(version, "version"),
-            loaded=False,
-        ),
-        _parse_library_version(expected_version, "expected_version"),
-    )
 
 
 class LibraryStorage:
@@ -439,6 +400,29 @@ class LibraryStorage:
                 f"expected {expected_version}, current {current_version}"
             )
 
+    # ------------------------------------------------------------------
+    # Library parsers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def parse_load_message(message: tuple) -> tuple[str, str, _LibraryEntity, int]:
+        _, name, code, library_hash, expected_version, version = message
+        return (
+            _to_str(name),
+            _to_str(code),
+            _LibraryEntity(hash=bytes(library_hash), version=version, loaded=True),
+            expected_version,
+        )
+
+    @staticmethod
+    def parse_delete_message(message: tuple) -> tuple[str, _LibraryEntity, int]:
+        _, name, library_hash, expected_version, version = message
+        return (
+            _to_str(name),
+            _LibraryEntity(hash=bytes(library_hash), version=version, loaded=False),
+            expected_version,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Message dispatcher
@@ -446,7 +430,10 @@ class LibraryStorage:
 
 
 class MessageDispatcher:
-    __slots__ = ("_safe_builtins", "_library_storage", "_caller", "_logger", "_table")
+    __slots__ = (
+        "_safe_builtins", "_library_storage", "_caller", "_logger",
+        "_table", "_exec_count", "_gc_interval", "_compile_code",
+    )
 
     def __init__(
         self,
@@ -454,11 +441,16 @@ class MessageDispatcher:
         library_storage: LibraryStorage,
         caller: ErlangCaller,
         logger: ErlangLogger,
+        cache_size: int,
+        gc_interval: int,
     ) -> None:
         self._safe_builtins = safe_builtins
         self._library_storage = library_storage
         self._caller = caller
         self._logger = logger
+        self._exec_count = 0
+        self._gc_interval = gc_interval
+        self._compile_code = self._generate_code_cache(cache_size)
         self._table: dict[Any, Callable[[Any], Any]] = {
             _ATOM_LOAD_LIBRARY: self._handle_load_library,
             _ATOM_DELETE_LIBRARY: self._handle_delete_library,
@@ -476,7 +468,7 @@ class MessageDispatcher:
 
     def _handle_load_library(self, message: Any) -> Any:
         try:
-            name, code, target_entry, expected_version = _parse_load_library_message(message)
+            name, code, target_entry, expected_version = LibraryStorage.parse_load_message(message)
             self._library_storage.load(name, code, target_entry, expected_version)
         except ValueError as exception:
             return _error_response(str(exception))
@@ -489,7 +481,7 @@ class MessageDispatcher:
 
     def _handle_delete_library(self, message: Any) -> Any:
         try:
-            name, target_entry, expected_version = _parse_delete_library_message(message)
+            name, target_entry, expected_version = LibraryStorage.parse_delete_message(message)
             self._library_storage.delete(name, target_entry, expected_version)
         except KeyError:
             return _error_response("Library not loaded")
@@ -499,12 +491,11 @@ class MessageDispatcher:
             return _error_response(
                 f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
             )
+
+        gc.collect(0)
         return _ATOM_OK
 
     def _handle_exec(self, message: Any) -> Any:
-        if not isinstance(message, tuple) or len(message) != 4:
-            return _error_response("Invalid exec message format")
-
         _, code, arguments, state = message
 
         namespace: dict[str, Any] = {
@@ -517,7 +508,7 @@ class MessageDispatcher:
         }
 
         try:
-            exec(_to_str(code), namespace)
+            exec(self._compile_code(_to_str(code)), namespace)
             return _ok_response((namespace.get("result"), namespace.get("state")))
         except SystemExit:
             return _error_response("SystemExit is not allowed")
@@ -525,10 +516,32 @@ class MessageDispatcher:
             return _error_response(
                 f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
             )
+        finally:
+            namespace.clear()
+            self._exec_count += 1
+            self._check_gc_sweep()
 
     @staticmethod
     def _handle_unknown(message: Any) -> Any:
         return _error_response(f"Unknown message tag: {message!r}")
+
+    # ------------------------------------------------------------------
+    # GC management
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _generate_code_cache(maxsize: int) -> Callable[[str], types.CodeType]:
+        @functools.lru_cache(maxsize=maxsize)
+        def compile_code(code: str) -> types.CodeType:
+            return compile(code, "<erl_py_runner>", "exec")
+        return compile_code
+
+    def _check_gc_sweep(self) -> None:
+        """GC Collect on Young Generation
+        https://docs.python.org/3/library/gc.html
+        """
+        if (self._exec_count % self._gc_interval) == 0:
+            gc.collect(0)
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +564,7 @@ class Worker:
             message = self._port.read()
         except MessageEOF:
             self._fatal("stdin closed before initialization", exit_code=1)
-        except (MessageOversized, MessageTruncated) as exception:
+        except ProtocolError as exception:
             self._fatal(str(exception), exit_code=1)
         except Exception as exception:
             self._fatal(
@@ -559,21 +572,19 @@ class Worker:
                 exit_code=1,
             )
 
-        if (
-            not isinstance(message, tuple)
-            or len(message) != 2
-            or message[0] != _ATOM_INIT
-        ):
-            self._fatal("Expected (init, Modules) tuple", exit_code=1)
+        if message[0] != _ATOM_INIT:
+            self._fatal("Expected {init, Options} message", exit_code=1)
 
-        raw_modules = message[1]
-        if raw_modules == Atom("all"):
+        _, options = message
+
+        raw_modules = options.get(_ATOM_MODULES, _ATOM_ALL)
+        cache_size = options.get(_ATOM_CACHE_SIZE, _DEFAULT_CACHE_SIZE)
+        gc_interval = options.get(_ATOM_GC_INTERVAL, _DEFAULT_GC_INTERVAL)
+
+        if raw_modules == _ATOM_ALL:
             allowed_modules: list[str] | None = None
         else:
-            try:
-                allowed_modules = [_to_str(m) for m in raw_modules]
-            except (TypeError, ValueError, AttributeError) as exception:
-                self._fatal(f"Invalid allowed modules: {exception}", exit_code=1)
+            allowed_modules = [_to_str(m) for m in raw_modules]
 
         safe_builtins = _build_safe_builtins(allowed_modules)
         library_storage = LibraryStorage(safe_builtins)
@@ -581,9 +592,19 @@ class Worker:
         caller = ErlangCaller(self._port)
         logger = ErlangLogger(self._port)
 
-        dispatcher = MessageDispatcher(safe_builtins, library_storage, caller, logger)
+        dispatcher = MessageDispatcher(
+            safe_builtins,
+            library_storage,
+            caller,
+            logger,
+            cache_size,
+            gc_interval
+        )
 
         self._port.write(_ATOM_OK)
+
+        gc.collect()
+        gc.freeze()
 
         return dispatcher
 
