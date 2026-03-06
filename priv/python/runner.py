@@ -56,6 +56,8 @@ _HEADER_STRUCT: Final[struct.Struct] = struct.Struct("!I")
 
 _ATOM_OK:             Final[Atom] = Atom("ok")
 _ATOM_ERROR:          Final[Atom] = Atom("error")
+_ATOM_MESSAGE:        Final[Atom] = Atom("message")
+_ATOM_TRACE:          Final[Atom] = Atom("trace")
 _ATOM_INIT:           Final[Atom] = Atom("init")
 _ATOM_EXEC:           Final[Atom] = Atom("exec")
 _ATOM_CALL:           Final[Atom] = Atom("call")
@@ -135,8 +137,14 @@ def _ok_response(result: Any) -> tuple[Atom, Any]:
     return _ATOM_OK, result
 
 
-def _error_response(error: str) -> tuple[Atom, str]:
-    return _ATOM_ERROR, error
+def _error_response(message: str | None = None, exception: BaseException | None = None) -> tuple[Atom, dict]:
+    if exception is not None:
+        msg = message if message is not None else f"{type(exception).__name__}: {exception}"
+        trace = "".join(traceback.format_exception(exception))
+    else:
+        msg = message or ""
+        trace = ""
+    return _ATOM_ERROR, {_ATOM_MESSAGE: msg, _ATOM_TRACE: trace}
 
 
 # ---------------------------------------------------------------------------
@@ -500,10 +508,8 @@ class MessageDispatcher:
     def _handle_load_library(self, message: Any) -> Any:
         try:
             name, code, target_entry, expected_version = LibraryStorage.parse_load_message(message)
-        except Exception as exception:
-            return _error_response(
-                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-            )
+        except Exception as e:
+            return _error_response(exception=e)
 
         try:
             self._library_storage.load(name, code, target_entry, expected_version)
@@ -511,58 +517,44 @@ class MessageDispatcher:
             meta = self._fetch_library_from_loader(name)
 
             if meta is None:
-                return _error_response(
-                    f"Library {name!r} version mismatch and not found in loader"
-                )
+                return _error_response(f"Library {name!r} version mismatch and not found in loader")
 
             try:
                 _, fetched_code, fetched_hash, fetched_version = meta
                 self._library_storage.load_direct(
                     name, _to_str(fetched_code), bytes(fetched_hash), fetched_version
                 )
-            except Exception as exception:
-                return _error_response(
-                    f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-                )
-        except ValueError as exception:
-            return _error_response(str(exception))
-        except Exception as exception:
-            return _error_response(
-                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-            )
+            except Exception as e:
+                return _error_response(exception=e)
+        except ValueError as e:
+            return _error_response(exception=e)
+        except Exception as e:
+            return _error_response(exception=e)
 
         return _ATOM_OK
 
     def _handle_delete_library(self, message: Any) -> Any:
         try:
             name, target_entry, expected_version = LibraryStorage.parse_delete_message(message)
-        except Exception as exception:
-            return _error_response(
-                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-            )
+        except Exception as e:
+            return _error_response(exception=e)
 
         try:
             self._library_storage.delete(name, target_entry, expected_version)
         except LibraryVersionError:
             meta = self._fetch_library_from_loader(name)
             if meta is not None:
-                return _error_response(
-                    f"Library {name!r} version mismatch but still exists in loader"
-                )
+                return _error_response(f"Library {name!r} version mismatch but still exists in loader")
             try:
                 self._library_storage.delete_direct(name)
-            except Exception as exception:
-                return _error_response(
-                    f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-                )
-        except KeyError:
-            return _error_response("Library not loaded")
-        except ValueError as exception:
-            return _error_response(str(exception))
-        except Exception as exception:
-            return _error_response(
-                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-            )
+            except Exception as e:
+                return _error_response(exception=e)
+        except KeyError as e:
+            return _error_response("Library not loaded", exception=e)
+        except ValueError as e:
+            return _error_response(exception=e)
+        except Exception as e:
+            return _error_response(exception=e)
 
         gc.collect(0)
         return _ATOM_OK
@@ -588,12 +580,10 @@ class MessageDispatcher:
         try:
             exec(self._compile_code(_to_str(code)), namespace)
             return _ok_response((namespace.get("result"), namespace.get("state")))
-        except SystemExit:
-            return _error_response("SystemExit is not allowed")
-        except Exception as exception:
-            return _error_response(
-                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
-            )
+        except SystemExit as e:
+            return _error_response("SystemExit is not allowed", exception=e)
+        except Exception as e:
+            return _error_response(exception=e)
         finally:
             namespace.clear()
             self._exec_count += 1
@@ -696,10 +686,8 @@ class Worker:
                 self._port.write(response)
             except (BrokenPipeError, OSError):
                 break
-            except Exception as exception:
-                self._try_write(
-                    _error_response(f"Handler error: {type(exception).__name__}: {exception}")
-                )
+            except Exception as e:
+                self._try_write(_error_response(exception=e))
                 sys.exit(2)
 
     def _read_next(self) -> Any | None:
@@ -707,10 +695,8 @@ class Worker:
             return self._port.read()
         except MessageEOF:
             return None
-        except Exception as exception:
-            self._try_write(
-                _error_response(f"Message error: {type(exception).__name__}: {exception}")
-            )
+        except Exception as e:
+            self._try_write(_error_response(exception=e))
             sys.exit(2)
 
     def _fatal(self, reason: str, *, exit_code: int) -> NoReturn:
