@@ -248,6 +248,15 @@ wait_port_response(
 
 handle_callback(
   RequestID,
+  erl_py_runner_loader,
+  get_library_meta,
+  [Name],
+  #data{port = Port}
+) ->
+  send_port_command(Port, ?COMMAND_REPLY(RequestID, erl_py_runner_loader:get_library_meta(Name)));
+
+handle_callback(
+  RequestID,
   Module,
   Function,
   Arguments,

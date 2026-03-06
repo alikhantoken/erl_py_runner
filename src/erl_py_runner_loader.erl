@@ -18,7 +18,8 @@
   load_library/2,
   delete_library/1,
   get_libraries/0,
-  get_libraries_meta/0
+  get_libraries_meta/0,
+  get_library_meta/1
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -46,10 +47,19 @@ start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 load_library(Name, Code) ->
-  gen_server:call(?MODULE, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY).
+  case is_library_name_valid(Name) of
+    true -> gen_server:call(?MODULE, ?CALL_LOAD_LIBRARY(Name, Code), ?TIMEOUT_LOAD_LIBRARY);
+    false -> {error, invalid_library_name}
+  end.
 
 delete_library(Name) ->
-  gen_server:call(?MODULE, ?CALL_DELETE_LIBRARY(Name), ?TIMEOUT_LOAD_LIBRARY).
+  case is_library_name_valid(Name) of
+    true -> gen_server:call(?MODULE, ?CALL_DELETE_LIBRARY(Name), ?TIMEOUT_LOAD_LIBRARY);
+    false -> {error, invalid_library_name}
+  end.
+
+get_library_meta(Name) ->
+  gen_server:call(?MODULE, ?CALL_GET_LIBRARY_META(Name), ?TIMEOUT_GET_LIBRARIES).
 
 get_libraries() ->
   gen_server:call(?MODULE, ?CALL_GET_LIBRARIES, ?TIMEOUT_GET_LIBRARIES).
@@ -131,6 +141,19 @@ handle_call(
     } <- Libraries],
   {reply, {ok, Result}, State};
 
+handle_call(
+  ?CALL_GET_LIBRARY_META(Name),
+  _Caller,
+  #loader{libraries = Libraries} = State
+) ->
+  case lists:keyfind(Name, #library.name, Libraries) of
+    false ->
+      {reply, {error, not_found}, State};
+    #library{name = Name, code = Code, hash = Hash, version = Version} ->
+      Library = {Name, Code, Hash, Version},
+      {reply, {ok, Library}, State}
+  end;
+
 handle_call(Unexpected, _From, State) ->
   ?LOGWARNING("received unexpected message: ~p", [Unexpected]),
   {reply, {error, unexpected_message}, State}.
@@ -151,6 +174,11 @@ terminate(Reason, _State) ->
 %%% |                       Internal Functions                     |
 %%% +--------------------------------------------------------------+
 
+is_library_name_valid(Name) when is_binary(Name), byte_size(Name) > 0 ->
+  re:run(Name, <<"^(?:_)?[a-z][a-z0-9_]*$">>, [{capture, none}]) =:= match;
+is_library_name_valid(_) ->
+  false.
+
 do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) ->
   {Library, ExpectedVersion, NewVersionCounter} =
     prepare_library(Name, Code, Libraries, VersionCounter),
@@ -158,11 +186,18 @@ do_load_library(WorkerPIDs, Name, Code, Libraries, VersionCounter) ->
     erlang:monotonic_time(millisecond) + ?TIMEOUT_LOAD_LIBRARY,
   case broadcast_library(WorkerPIDs, Library, ExpectedVersion, Deadline) of
     {_, []} ->
-      ?LOGINFO("successfully loaded library ~ts on ~p workers", [Name, length(WorkerPIDs)]),
+      ?LOGINFO("successfully loaded library ~ts on ~p workers", [
+        Name,
+        length(WorkerPIDs)
+      ]),
       {ok, insert_library(Library, Libraries), NewVersionCounter};
     {SuccessfulPIDs, BroadcastErrors} ->
-      ?LOGWARNING("failed to load library ~ts on ~p workers, errors: ~p, rolling back ~p workers",
-                  [Name, length(WorkerPIDs), BroadcastErrors, length(SuccessfulPIDs)]),
+      ?LOGWARNING("failed to load library ~ts on ~p workers, errors: ~p, rolling back ~p workers", [
+        Name,
+        length(WorkerPIDs),
+        BroadcastErrors,
+        length(SuccessfulPIDs)
+      ]),
       case rollback_library(SuccessfulPIDs, Library, Libraries, Deadline) of
         [] ->
           {error, BroadcastErrors};

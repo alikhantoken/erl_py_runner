@@ -20,5 +20,6 @@
 -define(CALL_DELETE_LIBRARY(Name),     {delete_library, Name}).
 -define(CALL_GET_LIBRARIES,            get_libraries).
 -define(CALL_GET_LIBRARIES_META,       get_libraries_meta).
+-define(CALL_GET_LIBRARY_META(Name),   {get_library_meta, Name}).
 
 -endif.

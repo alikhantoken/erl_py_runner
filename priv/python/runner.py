@@ -118,6 +118,10 @@ class ErlangPortError(ErlangError):
     """Raised when the Erlang port connection is lost or corrupted."""
 
 
+class LibraryVersionError(ValueError):
+    """Raised when stored library version does not match the expected version."""
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -395,10 +399,37 @@ class LibraryStorage:
     def _check_version(name: str, entry: _LibraryEntity | None, expected_version: int) -> None:
         current_version = 0 if entry is None else entry.version
         if current_version != expected_version:
-            raise ValueError(
+            raise LibraryVersionError(
                 f"Library version mismatch for {name!r}: "
                 f"expected {expected_version}, current {current_version}"
             )
+
+    def load_direct(self, name: str, code: str, hash_bytes: bytes, version: int) -> None:
+        self._check_name(name)
+
+        entry = _LibraryEntity(
+            hash=hash_bytes,
+            version=version,
+            loaded=True
+        )
+
+        if self._entries.get(name) == entry:
+            return
+
+        module = types.ModuleType(name)
+        module.__dict__["__builtins__"] = self._safe_builtins
+
+        try:
+            exec(code, module.__dict__)
+        except SystemExit as exception:
+            raise ValueError("SystemExit is not allowed in library code") from exception
+
+        sys.modules[name] = module
+        self._entries[name] = entry
+
+    def delete_direct(self, name: str) -> None:
+        sys.modules.pop(name, None)
+        self._entries.pop(name, None)
 
     # ------------------------------------------------------------------
     # Library parsers
@@ -469,7 +500,30 @@ class MessageDispatcher:
     def _handle_load_library(self, message: Any) -> Any:
         try:
             name, code, target_entry, expected_version = LibraryStorage.parse_load_message(message)
+        except Exception as exception:
+            return _error_response(
+                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
+            )
+
+        try:
             self._library_storage.load(name, code, target_entry, expected_version)
+        except LibraryVersionError:
+            meta = self._fetch_library_from_loader(name)
+
+            if meta is None:
+                return _error_response(
+                    f"Library {name!r} version mismatch and not found in loader"
+                )
+
+            try:
+                _, fetched_code, fetched_hash, fetched_version = meta
+                self._library_storage.load_direct(
+                    name, _to_str(fetched_code), bytes(fetched_hash), fetched_version
+                )
+            except Exception as exception:
+                return _error_response(
+                    f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
+                )
         except ValueError as exception:
             return _error_response(str(exception))
         except Exception as exception:
@@ -482,7 +536,25 @@ class MessageDispatcher:
     def _handle_delete_library(self, message: Any) -> Any:
         try:
             name, target_entry, expected_version = LibraryStorage.parse_delete_message(message)
+        except Exception as exception:
+            return _error_response(
+                f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
+            )
+
+        try:
             self._library_storage.delete(name, target_entry, expected_version)
+        except LibraryVersionError:
+            meta = self._fetch_library_from_loader(name)
+            if meta is not None:
+                return _error_response(
+                    f"Library {name!r} version mismatch but still exists in loader"
+                )
+            try:
+                self._library_storage.delete_direct(name)
+            except Exception as exception:
+                return _error_response(
+                    f"{type(exception).__name__}: {exception}\n{traceback.format_exc()}"
+                )
         except KeyError:
             return _error_response("Library not loaded")
         except ValueError as exception:
@@ -494,6 +566,12 @@ class MessageDispatcher:
 
         gc.collect(0)
         return _ATOM_OK
+
+    def _fetch_library_from_loader(self, name: str) -> tuple | None:
+        try:
+            return self._caller.call('erl_py_runner_loader', 'get_library_meta', [name])
+        except ErlangError:
+            return None
 
     def _handle_exec(self, message: Any) -> Any:
         _, code, arguments, state = message
