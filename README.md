@@ -188,7 +188,3 @@ All messages are **ETF-encoded tuples**.
 | Python → Erlang | Error Result | `{error, ErrorString}` |
 | Python → Erlang | Call Request | `{call, RequestID, Module, Function, Arguments}` |
 | Erlang → Python | Call Response | `{call_reply, RequestID, {ok, Result} \| {error, Error}}` |
-
-## License
-
-MIT see [LICENSE](LICENSE).
