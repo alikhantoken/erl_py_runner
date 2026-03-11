@@ -30,11 +30,17 @@ verify(Config) ->
       #{},
       default()
     ),
+  #{
+    worker := #{
+      supervisor := SupConfig,
+      config := WorkerConfig
+    }
+  } = Verified,
+  lists:foreach(fun validate_option/1, maps:to_list(SupConfig)),
+  lists:foreach(fun validate_option/1, maps:to_list(WorkerConfig)),
   Environment = resolve_environment(maps:get(environment, Verified)),
   ok = ensure(Environment),
-  Verified#{
-    environment => Environment
-  }.
+  Verified#{environment => Environment}.
   
 %%% +--------------------------------------------------------------+
 %%% |                       Internal functions                     |
@@ -54,9 +60,12 @@ default() ->
         period => 30
       },
       config => #{
-        timeout => 60000,
         pool_size => 3,
-        max_pending => infinity
+        max_pending => infinity,
+        exec_timeout => 60000,       % Milliseconds
+        operation_timeout => 30000,  % Milliseconds
+        restart_delay => 0,          % Delay between worker restart
+        max_code_size => 1048576     % 1 megabyte
       },
       modules_whitelist => #{
         erlang_modules => [
@@ -159,3 +168,38 @@ resolve_path(RootPath, Path) ->
     relative -> filename:join(RootPath, Path);
     _Other -> Path
   end.
+
+validate_option({pool_size, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({pool_size, Value}) ->
+  throw({invalid_config, pool_size, Value});
+
+validate_option({max_code_size, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({max_code_size, Value}) ->
+  throw({invalid_config, max_code_size, Value});
+
+validate_option({intensity, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({intensity, Value}) ->
+  throw({invalid_config, intensity, Value});
+
+validate_option({period, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({period, Value}) ->
+  throw({invalid_config, period, Value});
+
+validate_option({exec_timeout, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({exec_timeout, Value}) ->
+  throw({invalid_config, exec_timeout, Value});
+
+validate_option({operation_timeout, Value}) when is_integer(Value), Value > 0 -> ok;
+validate_option({operation_timeout, Value}) ->
+  throw({invalid_config, operation_timeout, Value});
+
+validate_option({max_pending, infinity}) -> ok;
+validate_option({max_pending, Value}) when is_integer(Value), Value >= 0 -> ok;
+validate_option({max_pending, Value}) ->
+  throw({invalid_config, max_pending, Value});
+
+validate_option({restart_delay, Value}) when is_integer(Value), Value >= 0 -> ok;
+validate_option({restart_delay, Value}) ->
+  throw({invalid_config, restart_delay, Value});
+
+validate_option({_Key, _Value}) -> ok.

@@ -6,11 +6,21 @@
 -ifndef(ERL_PY_RUNNER_POOL).
 -define(ERL_PY_RUNNER_POOL, 1).
 
--define(GET_WORKER,        get_worker).
--define(WORKER_START(PID), {worker_start, PID}).
--define(WORKER_READY(PID), {worker_ready, PID}).
+-define(GET_WORKER(Deadline), {get_worker, Deadline}).
+-define(WORKER_START(PID),    {worker_start, PID}).
+-define(WORKER_READY(PID),    {worker_ready, PID}).
 
 -define(IDLE_WORKERS_TAB, erl_py_runner_pool_idle).
+
+%% Gen server call requests.
+-define(CALL_GET_WORKERS, get_workers).
+-define(TIMEOUT_GET_WORKERS, 5000).
+
+-record(pending, {
+  caller,
+  monitor,
+  deadline
+}).
 
 -record(pool, {
   max_pending,
@@ -19,10 +29,5 @@
   worker_monitors,
   caller_monitors
 }).
-
-%% Gen server call requests.
--define(CALL_GET_WORKERS, get_workers).
-
--define(TIMEOUT_GET_WORKERS, 5000).
 
 -endif.

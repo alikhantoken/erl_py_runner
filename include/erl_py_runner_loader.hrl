@@ -6,20 +6,17 @@
 -ifndef(ERL_PY_RUNNER_LOADER).
 -define(ERL_PY_RUNNER_LOADER, 1).
 
--record(loader, {
-  libraries,
-  version_counter
-}).
+-define(LIBRARIES_TAB, erl_py_runner_libraries).
 
 %% Timeout for broadcasting a library to all existing workers.
 -define(TIMEOUT_LOAD_LIBRARY, 180000).
--define(TIMEOUT_GET_LIBRARIES, 5000).
 
 %% Gen server call requests.
 -define(CALL_LOAD_LIBRARY(Name, Code), {load_library, Name, Code}).
 -define(CALL_DELETE_LIBRARY(Name),     {delete_library, Name}).
--define(CALL_GET_LIBRARIES,            get_libraries).
--define(CALL_GET_LIBRARIES_META,       get_libraries_meta).
--define(CALL_GET_LIBRARY_META(Name),   {get_library_meta, Name}).
+
+-record(loader, {
+  version_counter
+}).
 
 -endif.

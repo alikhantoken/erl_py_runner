@@ -35,12 +35,22 @@ stop(_State) ->
   ok.
 
 restart() ->
-  case application:stop(?APP_NAME) of
+  case do_stop() of
     ok ->
       case application:start(?APP_NAME) of
-        ok -> ok;
-        {error, Reason} -> {error, {start_failed, Reason}}
+        ok ->
+          ok;
+        {error, Reason} ->
+          ?LOGERROR("application failed to restart, system is now stopped: ~p", [Reason]),
+          {error, {start_failed, Reason}}
       end;
     {error, Reason} ->
       {error, {stop_failed, Reason}}
+  end.
+
+do_stop() ->
+  case application:stop(?APP_NAME) of
+    ok -> ok;
+    {error, {not_started, ?APP_NAME}} -> ok;
+    {error, Reason} -> {error, Reason}
   end.

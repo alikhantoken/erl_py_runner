@@ -14,33 +14,42 @@
 -define(WORKER_DEFAULT_SUP_PERIOD, 60).
 -define(SUP_DEFAULT_INTENSITY, 10).
 -define(SUP_DEFAULT_PERIOD, 60).
+-define(TIMEOUT_INFO, 30000).
 
 -define(MFA_METADATA, #{
   mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY},
   line => ?LINE
 }).
 
--define(LOG(Level, Text),        logger:log(Level, Text, ?MFA_METADATA)).
--define(LOGERROR(Text),          logger:error(Text, [], ?MFA_METADATA)).
--define(LOGERROR(Text,Params),   logger:error(Text, Params, ?MFA_METADATA)).
--define(LOGWARNING(Text),        logger:warning(Text, [], ?MFA_METADATA)).
--define(LOGWARNING(Text,Params), logger:warning(Text, Params, ?MFA_METADATA)).
--define(LOGINFO(Text),           logger:info(Text, [], ?MFA_METADATA)).
--define(LOGINFO(Text,Params),    logger:info(Text, Params, ?MFA_METADATA)).
--define(LOGDEBUG(Text),          logger:debug(Text, [], ?MFA_METADATA)).
--define(LOGDEBUG(Text,Params),   logger:debug(Text, Params, ?MFA_METADATA)).
+-define(LOG(Level, Text),            logger:log(Level, Text, ?MFA_METADATA)).
+-define(LOGERROR(Text),              logger:error(Text, [], ?MFA_METADATA)).
+-define(LOGERROR(Text,Params),       logger:error(Text, Params, ?MFA_METADATA)).
+-define(LOGWARNING(Text),            logger:warning(Text, [], ?MFA_METADATA)).
+-define(LOGWARNING(Text,Params),     logger:warning(Text, Params, ?MFA_METADATA)).
+-define(LOGINFO(Text),               logger:info(Text, [], ?MFA_METADATA)).
+-define(LOGINFO(Text,Params),        logger:info(Text, Params, ?MFA_METADATA)).
+-define(LOGDEBUG(Text),              logger:debug(Text, [], ?MFA_METADATA)).
+-define(LOGDEBUG(Text,Params),       logger:debug(Text, Params, ?MFA_METADATA)).
 
--define(ENV(Key@, Default@), application:get_env(erl_py_runner, Key@, Default@)).
--define(ENV(Key@), application:get_env(erl_py_runner, Key@)).
+-define(ENV(Key@, Default@),         application:get_env(erl_py_runner, Key@, Default@)).
+-define(ENV(Key@),                   application:get_env(erl_py_runner, Key@)).
 
--define(PIP_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "pip"])).
+-define(PIP_PATH(VenvDirectory@),    filename:join([VenvDirectory@, "bin", "pip"])).
 -define(PYTHON_PATH(VenvDirectory@), filename:join([VenvDirectory@, "bin", "python3"])).
+
+-define(MONOTONIC_MS,                erlang:monotonic_time(millisecond)).
+-define(DEADLINE(Timeout),           erlang:monotonic_time(millisecond) + (Timeout)).
+-define(IS_EXPIRED(Deadline),        erlang:monotonic_time(millisecond) >= (Deadline)).
+
+-define(REMAINING(Deadline),         max(0, (Deadline) - erlang:monotonic_time(millisecond))).
+-define(REMAINING_CALL(Deadline),    max(1, (Deadline) - erlang:monotonic_time(millisecond))).
 
 -record(library, {
   name,
   code,
   hash,
-  version
+  version,
+  insert_order
 }).
 
 -endif.

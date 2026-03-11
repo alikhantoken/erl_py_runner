@@ -51,34 +51,27 @@ start_link(Config) ->
   gen_server:start_link(?MODULE, Config, []).
 
 run(Code, Arguments) ->
-  run(Code, Arguments, _State = undefined, ?TIMEOUT_RUN).
+  {ok, #{config := #{exec_timeout := Timeout}}} = ?ENV(worker),
+  run(Code, Arguments, _State = undefined, Timeout).
 
 run(Code, Arguments, State) ->
-  run(Code, Arguments, State, ?TIMEOUT_RUN).
+  {ok, #{config := #{exec_timeout := Timeout}}} = ?ENV(worker),
+  run(Code, Arguments, State, Timeout).
   
 run(Code, Arguments, State, Timeout) ->
-  Deadline = ?MONOTONIC_MS + Timeout,
+  Deadline = ?DEADLINE(Timeout),
   case erl_py_runner_pool:get_worker(Timeout) of
     {ok, Worker} ->
-      Remaining = max(1, Deadline - ?MONOTONIC_MS),
-      gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State, Deadline), Remaining);
+      gen_server:call(Worker, ?CALL_RUN(Code, Arguments, State, Deadline), ?REMAINING_CALL(Deadline));
     {error, _} = Error ->
       Error
   end.
 
 load_library(Worker, #library{} = Library, ExpectedVersion) ->
-  gen_server:call(
-    Worker,
-    ?CALL_LOAD_LIBRARY(Library, ExpectedVersion),
-    ?TIMEOUT_LOAD_LIBRARY
-  ).
+  gen_server:call(Worker, ?CALL_LOAD_LIBRARY(Library, ExpectedVersion), ?TIMEOUT_LOAD_LIBRARY_CALL).
 
 delete_library(Worker, #library{} = Library, ExpectedVersion) ->
-  gen_server:call(
-    Worker,
-    ?CALL_DELETE_LIBRARY(Library, ExpectedVersion),
-    ?TIMEOUT_LOAD_LIBRARY
-  ).
+  gen_server:call(Worker, ?CALL_DELETE_LIBRARY(Library, ExpectedVersion), ?TIMEOUT_LOAD_LIBRARY_CALL).
 
 info(Worker) ->
   gen_server:call(Worker, ?CALL_INFO, ?TIMEOUT_INFO).
@@ -89,10 +82,13 @@ info(Worker) ->
 
 init(#{
   runner := Runner,
-  timeout := Timeout,
+  exec_timeout := ExecTimeout,
+  operation_timeout := OperationTimeout,
+  restart_delay := RestartDelay,
   python_modules := AllowedPythonModules,
   erlang_modules := AllowedErlangModules
 }) ->
+  ok = delay_restart(RestartDelay),
   Port =
     erlang:open_port(
       {spawn, Runner},
@@ -103,18 +99,18 @@ init(#{
       {os_pid, PID} -> PID;
       undefined -> undefined
     end,
-  Data =
-    #data{
-      port = Port,
-      os_pid = OsPid,
-      timeout = Timeout,
-      allowed_modules =
-        case AllowedErlangModules of
-          Modules when is_list(Modules) -> maps:from_keys(Modules, true);
-          all -> all;
-          _Other -> #{}
-        end
-    },
+  Data = #data{
+    port = Port,
+    os_pid = OsPid,
+    exec_timeout = ExecTimeout,
+    operation_timeout = OperationTimeout,
+    allowed_modules =
+      case AllowedErlangModules of
+        Modules when is_list(Modules) -> maps:from_keys(Modules, true);
+        all -> all;
+        _Other -> #{}
+      end
+  },
   ok = handshake(Data, #{modules => AllowedPythonModules}),
   {ok, Libraries} = erl_py_runner_loader:get_libraries_meta(),
   case reload_libraries(Data, Libraries) of
@@ -131,10 +127,22 @@ handle_call(
   _Caller,
   #data{port = Port} = Data
 ) ->
-  send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
-  Result = wait_port_response(Data, Deadline),
-  erl_py_runner_pool:send_worker_ready(self()),
-  {reply, Result, Data};
+  case ?IS_EXPIRED(Deadline) of
+    true ->
+      erl_py_runner_pool:send_worker_ready(self()),
+      {reply, {error, timeout}, Data};
+    false ->
+      send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
+      case wait_port_response(Data, Deadline) of
+        {stop, port_timeout} ->
+          {stop, port_timeout, {error, timeout}, Data};
+        {stop, Reason} ->
+          {stop, Reason, {error, Reason}, Data};
+        Result ->
+          erl_py_runner_pool:send_worker_ready(self()),
+          {reply, Result, Data}
+      end
+  end;
 
 handle_call(
   ?CALL_LOAD_LIBRARY(
@@ -142,12 +150,17 @@ handle_call(
     ExpectedVersion
   ),
   _Caller,
-  #data{port = Port, timeout = Timeout} = Data
+  #data{port = Port, operation_timeout = Timeout} = Data
 ) ->
   send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code, Hash, ExpectedVersion, Version)),
-  Deadline = ?MONOTONIC_MS + Timeout,
-  Result = wait_port_response(Data, Deadline),
-  {reply, Result, Data};
+  case wait_port_response(Data, ?DEADLINE(Timeout)) of
+    {stop, port_timeout} ->
+      {stop, port_timeout, {error, timeout}, Data};
+    {stop, Reason} ->
+      {stop, Reason, {error, Reason}, Data};
+    Result ->
+      {reply, Result, Data}
+  end;
 
 handle_call(
   ?CALL_DELETE_LIBRARY(
@@ -155,12 +168,17 @@ handle_call(
     ExpectedVersion
   ),
   _Caller,
-  #data{port = Port, timeout = Timeout} = Data
+  #data{port = Port, operation_timeout = Timeout} = Data
 ) ->
   send_port_command(Port, ?COMMAND_DELETE_LIBRARY(Name, Hash, ExpectedVersion, Version)),
-  Deadline = ?MONOTONIC_MS + Timeout,
-  Result = wait_port_response(Data, Deadline),
-  {reply, Result, Data};
+  case wait_port_response(Data, ?DEADLINE(Timeout)) of
+    {stop, port_timeout} ->
+      {stop, port_timeout, {error, timeout}, Data};
+    {stop, Reason} ->
+      {stop, Reason, {error, Reason}, Data};
+    Result ->
+      {reply, Result, Data}
+  end;
 
 handle_call(
   ?CALL_INFO,
@@ -199,29 +217,29 @@ worker_id(Number) ->
 handshake(
   #data{
     port = Port,
-    timeout = Timeout
+    operation_timeout = Timeout
   } = Data,
   Options
 ) ->
   send_port_command(Port, ?COMMAND_INIT(Options)),
-  Deadline = ?MONOTONIC_MS + Timeout,
-  case wait_port_response(Data, Deadline) of
+  case wait_port_response(Data, ?DEADLINE(Timeout)) of
     ok -> ok;
     {ok, Response} -> exit({init_unexpected, Response});
-    {error, Error} -> exit({init_failed, Error})
+    {error, Error} -> exit({init_failed, Error});
+    {stop, Reason} -> exit(Reason)
   end.
 
 wait_port_response(
   #data{port = Port} = Data,
   Deadline
 ) ->
-  Remaining = max(0, Deadline - ?MONOTONIC_MS),
+  Remaining = ?REMAINING(Deadline),
   receive
     {Port, {data, Binary}} ->
       Term =
         try erlang:binary_to_term(Binary, [safe])
         catch _:_ -> {error, invalid_term_received}
-        end,
+      end,
       case Term of
         ok ->
           ok;
@@ -234,16 +252,18 @@ wait_port_response(
           handle_callback(RequestID, Module, Function, Arguments, Data),
           wait_port_response(Data, Deadline);
         {error, Error} ->
-          {error, Error}
+          {error, Error};
+        _Other ->
+          {error, invalid_term_received}
       end;
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("port exited during execution: ~p, status code: ~p", [Port, StatusCode]),
-      exit({port_exit, {status_code, StatusCode}})
+      {stop, {port_exit, {status_code, StatusCode}}}
   after
     Remaining ->
       ?LOGERROR("port deadline exceeded, closing port: ~p", [Port]),
       catch erlang:port_close(Port),
-      exit(port_timeout)
+      {stop, port_timeout}
   end.
 
 handle_callback(
@@ -283,17 +303,12 @@ handle_log(Level, Message) ->
   try ?LOG(Level, Message) catch _:_ -> ok end.
 
 send_port_command(Port, Term) ->
-  send_port_command(Port, erlang:term_to_binary(Term), _DefaultRetries = 3).
-send_port_command(Port, Term, Retries) when Retries > 0 ->
-  case erlang:port_command(Port, Term, [nosuspend]) of
-    true ->
-      ok;
-    false ->
-      send_port_command(Port, Term, Retries - 1)
-  end;
-send_port_command(Port, _Term, _Retries) ->
-  catch erlang:port_close(Port),
-  exit(port_command_aborted).
+  try
+    erlang:port_command(Port, erlang:term_to_binary(Term))
+  catch _Class:Error ->
+    ?LOGWARNING("port command failed, closing port: ~p", [Error]),
+    exit(port_command_aborted)
+  end.
 
 is_module_allowed(_Module, all) ->
   ok;
@@ -327,23 +342,23 @@ collect_port_info(Port) ->
     ?PORT_INFO_KEYS
   ).
 
-reload_libraries(#data{timeout = Timeout} = Data, Libraries) ->
-  Deadline = ?MONOTONIC_MS + Timeout,
-  reload_libraries(Data, Libraries, Deadline).
-
+reload_libraries(#data{operation_timeout = Timeout} = Data, Libraries) ->
+  reload_libraries(Data, Libraries, ?DEADLINE(Timeout)).
 reload_libraries(_Data, [], _Deadline) ->
   ok;
 reload_libraries(
   #data{port = Port} = Data,
-  [{Name, Code, Hash, Version} | Rest],
+  [#library{name = Name, code = Code, hash = Hash, version = Version} | Rest],
   Deadline
 ) ->
   send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code, Hash, 0, Version)),
   case wait_port_response(Data, Deadline) of
     ok ->
       reload_libraries(Data, Rest, Deadline);
-    {error, _} = Error ->
-      Error
+    {error, Error} ->
+      {error, Error};
+    {stop, Reason} ->
+      {error, Reason}
   end.
 
 kill_os_process(undefined) ->
@@ -354,4 +369,10 @@ kill_os_process(OsPid) ->
       os:cmd("kill -15 " ++ erlang:integer_to_list(OsPid))
     end
   ),
+  ok.
+
+delay_restart(0) ->
+  ok;
+delay_restart(Delay) ->
+  timer:sleep(Delay),
   ok.

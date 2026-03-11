@@ -5,6 +5,7 @@
 
 -module(erl_py_runner_worker_sup).
 -include("erl_py_runner.hrl").
+-include("erl_py_runner_worker.hrl").
 -behaviour(supervisor).
 
 %%% +--------------------------------------------------------------+
@@ -33,4 +34,15 @@ init([Intensity, Period]) ->
   {ok, {Supervisor, []}}.
 
 info() ->
-  [erl_py_runner_worker:info(PID) || {_, PID, _, _} <- supervisor:which_children(?MODULE)].
+  Requests =
+    [begin
+      {PID, gen_server:send_request(PID, ?CALL_INFO)}
+     end || {_, PID, _, _} <- supervisor:which_children(?MODULE), is_pid(PID)],
+  [collect_worker_info(PID, Ref, ?DEADLINE(?TIMEOUT_INFO)) || {PID, Ref} <- Requests].
+
+collect_worker_info(PID, Ref, Deadline) ->
+  case gen_server:receive_response(Ref, ?REMAINING(Deadline)) of
+    {reply, Info} -> Info;
+    timeout -> #{pid => PID, error => timeout};
+    {error, _} -> #{pid => PID, error => unavailable}
+  end.

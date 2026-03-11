@@ -30,9 +30,11 @@ init([]) ->
       period := Period
     },
     config := #{
-      max_pending := MaxPending,
-      pool_size := PoolSize,
-      timeout := Timeout
+      pool_size         := PoolSize,
+      max_pending       := MaxPending,
+      exec_timeout      := ExecTimeout,
+      operation_timeout := OperationTimeout,
+      restart_delay     := RestartDelay
     },
     modules_whitelist := #{
       erlang_modules := ErlangModules,
@@ -59,10 +61,12 @@ init([]) ->
     end,
     
   WorkerConfig = #{
-    runner => PythonCMD ++ Runner,
-    timeout => Timeout,
-    python_modules => PythonModules,
-    erlang_modules => ErlangModules
+    runner            => PythonCMD ++ Runner,
+    exec_timeout      => ExecTimeout,
+    operation_timeout => OperationTimeout,
+    restart_delay     => RestartDelay,
+    python_modules    => PythonModules,
+    erlang_modules    => ErlangModules
   },
   
   %% NOTE!
@@ -72,7 +76,7 @@ init([]) ->
   Children = [
     #{
       id => erl_py_runner_worker_sup,
-      start => {erl_py_runner_worker_sup, start_link, [Intensity * PoolSize, Period]},
+      start => {erl_py_runner_worker_sup, start_link, [Intensity, Period]},
       restart => permanent,
       shutdown => infinity,
       type => supervisor

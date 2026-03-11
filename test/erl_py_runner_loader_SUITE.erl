@@ -73,11 +73,11 @@ init_per_suite(Config) ->
   application:stop(erl_py_runner),
   application:set_env(erl_py_runner, worker, #{
     supervisor => #{
-      intensity => 10,
-      period => 30
+      intensity => 100,
+      period => 60
     },
     config => #{
-      timeout => 10000,
+      exec_timeout => 10000,
       pool_size => 5,
       max_pending => infinity
     },

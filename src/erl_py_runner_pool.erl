@@ -41,11 +41,12 @@
 %%   Non-Blocking: Tries to acquire a worker right away through ETS for idle workers.
 %%   Blocking: Otherwise, it calls the gen_server and waits until one is free.
 get_worker(Timeout) ->
+  Deadline = ?DEADLINE(Timeout),
   case pop_idle() of
     {ok, Worker} ->
       {ok, Worker};
     empty ->
-      gen_server:call(?MODULE, ?GET_WORKER, Timeout)
+      gen_server:call(?MODULE, ?GET_WORKER(Deadline), ?REMAINING_CALL(Deadline))
   end.
 
 get_workers() ->
@@ -84,13 +85,13 @@ init([PoolSize, MaxPending, WorkerConfig]) ->
 %% Check ETS again (a worker might have returned after the caller checked).
 %% If still none, either put the caller in the queue or reject the request.
 handle_call(
-  ?GET_WORKER,
+  ?GET_WORKER(Deadline),
   Caller,
   #pool{
     pending = PendingQueue,
     pending_size = Size,
     max_pending = Max,
-    caller_monitors = CalledMonitors
+    caller_monitors = CallerMonitors
   } = Pool
 ) ->
   case pop_idle() of
@@ -104,9 +105,9 @@ handle_call(
           {CallerPID, _Tag} = Caller,
           MonRef = erlang:monitor(process, CallerPID),
           {noreply, Pool#pool{
-            pending = queue:in({Caller, MonRef}, PendingQueue),
+            pending = queue:in(#pending{caller = Caller, monitor = MonRef, deadline = Deadline}, PendingQueue),
             pending_size = Size + 1,
-            caller_monitors = CalledMonitors#{MonRef => true}
+            caller_monitors = CallerMonitors#{MonRef => true}
           }}
       end
   end;
@@ -154,7 +155,7 @@ handle_info(
         case CallerMonitors of
           #{MonRef := true} ->
             Filtered =
-              [Element || {_Caller, Ref} = Element <- queue:to_list(Pool#pool.pending), Ref =/= MonRef],
+              [Entry || #pending{monitor = Ref} = Entry <- queue:to_list(Pool#pool.pending), Ref =/= MonRef],
             Pool#pool{
               pending = queue:from_list(Filtered),
               pending_size = Pool#pool.pending_size - 1,
@@ -201,25 +202,39 @@ pop_idle() ->
       end
   end.
 
-%% Give the worker to the oldest waiting caller, or store it as idle in ETS.
-dispatch(
-  PID,
+%% Give the worker to the oldest live waiting caller, or store it as idle in ETS.
+dispatch(WorkerPID, Pool) ->
+  case dequeue_caller(Pool) of
+    {Caller, MonRef, UpdatedPool} ->
+      erlang:demonitor(MonRef, [flush]),
+      gen_server:reply(Caller, {ok, WorkerPID}),
+      UpdatedPool;
+    empty ->
+      ets:insert(?IDLE_WORKERS_TAB, {WorkerPID}),
+      Pool
+  end.
+
+dequeue_caller(
   #pool{
-    pending = PendingQueue,
+    pending = Queue,
     pending_size = Size,
-    caller_monitors = CallerMonitors
+    caller_monitors = Monitors
   } = Pool
 ) ->
-  case queue:out(PendingQueue) of
-    {{value, {Caller, MonRef}}, RestPendingQueue} ->
-      erlang:demonitor(MonRef, [flush]),
-      gen_server:reply(Caller, {ok, PID}),
-      Pool#pool{
-        pending = RestPendingQueue,
-        pending_size = Size - 1,
-        caller_monitors = maps:remove(MonRef, CallerMonitors)
-      };
+  case queue:out(Queue) of
     {empty, _} ->
-      ets:insert(?IDLE_WORKERS_TAB, {PID}),
-      Pool
+      empty;
+    {{value, #pending{caller = Caller, monitor = MonRef, deadline = Deadline}}, Rest} ->
+      UpdatedPool = Pool#pool{
+        pending = Rest,
+        pending_size = Size - 1,
+        caller_monitors = maps:remove(MonRef, Monitors)
+      },
+      case ?IS_EXPIRED(Deadline) of
+        true ->
+          erlang:demonitor(MonRef, [flush]),
+          dequeue_caller(UpdatedPool);
+        false ->
+          {Caller, MonRef, UpdatedPool}
+      end
   end.
