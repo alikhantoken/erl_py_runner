@@ -35,13 +35,21 @@ init([Intensity, Period]) ->
 
 stats() ->
   Requests =
-    [{PID, gen_server:send_request(PID, ?CALL_STATS)}
-     || {_, PID, _, _} <- supervisor:which_children(?MODULE), is_pid(PID)],
-  [collect_worker_stats(PID, Ref, ?DEADLINE(?TIMEOUT_STATS)) || {PID, Ref} <- Requests].
+    [begin
+      {ID, PID, gen_server:send_request(PID, ?CALL_STATS)}
+     end || {ID, PID, _, _} <- supervisor:which_children(?MODULE), is_pid(PID)],
+  [collect_worker_stats(Id, PID, Ref, ?DEADLINE(?TIMEOUT_STATS)) || {Id, PID, Ref} <- Requests].
 
-collect_worker_stats(PID, Ref, Deadline) ->
+collect_worker_stats(ID, PID, Ref, Deadline) ->
   case gen_server:receive_response(Ref, ?REMAINING(Deadline)) of
-    {reply, Stats} -> Stats;
-    timeout -> #{pid => list_to_binary(pid_to_list(PID)), error => timeout};
-    {error, _} -> #{pid => list_to_binary(pid_to_list(PID)), error => unavailable}
+    {reply, Stats} ->
+      Stats#{name => ID};
+    timeout ->
+      #{name => ID, pid => PID, error => timeout};
+    {error, Error} ->
+      ?LOGDEBUG(
+        "worker ~p with pid ~p is unavailable, error: ~p",
+        [ID, PID, Error]
+      ),
+      #{name => ID, pid => PID, error => unavailable}
   end.

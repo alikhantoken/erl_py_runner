@@ -134,8 +134,6 @@ handle_call(
     false ->
       send_port_command(Port, ?COMMAND_EXECUTE(Code, Arguments, State)),
       case wait_port_response(Data, Deadline) of
-        {stop, port_timeout} ->
-          {stop, port_timeout, {error, timeout}, Data};
         {stop, Reason} ->
           {stop, Reason, {error, Reason}, Data};
         Result ->
@@ -154,8 +152,6 @@ handle_call(
 ) ->
   send_port_command(Port, ?COMMAND_LOAD_LIBRARY(Name, Code, Hash, ExpectedVersion, Version)),
   case wait_port_response(Data, ?DEADLINE(Timeout)) of
-    {stop, port_timeout} ->
-      {stop, port_timeout, {error, timeout}, Data};
     {stop, Reason} ->
       {stop, Reason, {error, Reason}, Data};
     Result ->
@@ -172,8 +168,6 @@ handle_call(
 ) ->
   send_port_command(Port, ?COMMAND_DELETE_LIBRARY(Name, Hash, ExpectedVersion, Version)),
   case wait_port_response(Data, ?DEADLINE(Timeout)) of
-    {stop, port_timeout} ->
-      {stop, port_timeout, {error, timeout}, Data};
     {stop, Reason} ->
       {stop, Reason, {error, Reason}, Data};
     Result ->
@@ -187,12 +181,14 @@ handle_call(
 ) ->
   send_port_command(Port, ?COMMAND_STATS),
   case wait_port_response(Data, ?DEADLINE(Timeout)) of
-    {stop, port_timeout} ->
-      {stop, port_timeout, {error, timeout}, Data};
+    {ok, PythonStats} ->
+      {reply, #{
+        pid => self(),
+        erlang => collect_port_info(Port),
+        python => PythonStats
+      }, Data};
     {stop, Reason} ->
       {stop, Reason, {error, Reason}, Data};
-    {ok, PythonStats} ->
-      {reply, #{erlang => collect_port_info(Port), python => PythonStats}, Data};
     {error, _} = Error ->
       {reply, Error, Data}
   end.
