@@ -19,4 +19,10 @@
   version_counter
 }).
 
+-record(broadcast_status, {
+  pending,
+  successful,
+  errors
+}).
+
 -endif.

@@ -252,9 +252,7 @@ wait_port_response(
           handle_callback(RequestID, Module, Function, Arguments, Data),
           wait_port_response(Data, Deadline);
         {error, Error} ->
-          {error, Error};
-        _Other ->
-          {error, invalid_term_received}
+          {error, Error}
       end;
     {Port, {exit_status, StatusCode}} ->
       ?LOGERROR("port exited during execution: ~p, status code: ~p", [Port, StatusCode]),

@@ -101,10 +101,8 @@ handle_call(
   case do_load_library(WorkerPIDs, Name, Code, VersionCounter) of
     {ok, NewVersionCounter} ->
       {reply, ok, State#loader{version_counter = NewVersionCounter}};
-    {error, BroadcastErrors} ->
-      {reply, {error, BroadcastErrors}, State};
-    {error, BroadcastErrors, RollbackErrors} ->
-      {reply, {error, {broadcast_failed, BroadcastErrors, rollback_failed, RollbackErrors}}, State}
+    {error, Errors} ->
+      {reply, {error, Errors}, State}
   end;
 
 handle_call(
@@ -116,10 +114,8 @@ handle_call(
   case do_delete_library(WorkerPIDs, Name, VersionCounter) of
     {ok, NewVersionCounter} ->
       {reply, ok, State#loader{version_counter = NewVersionCounter}};
-    {error, DeleteErrors} ->
-      {reply, {error, DeleteErrors}, State};
-    {error, DeleteErrors, RollbackErrors} ->
-      {reply, {error, {broadcast_failed, DeleteErrors, rollback_failed, RollbackErrors}}, State}
+    {error, Errors} ->
+      {reply, {error, Errors}, State}
   end;
 
 handle_call(Unexpected, _From, State) ->
@@ -148,10 +144,14 @@ is_library_name_valid(_) ->
   false.
 
 do_load_library(WorkerPIDs, Name, Code, VersionCounter) ->
-  {Library, ExpectedVersion, NewVersionCounter} =
-    prepare_library(Name, Code, VersionCounter),
-  Deadline = ?DEADLINE(?TIMEOUT_LOAD_LIBRARY),
-  case broadcast_library(WorkerPIDs, Library, ExpectedVersion, Deadline) of
+  {Library, ExpectedVersion, NewVersionCounter} = prepare_library(Name, Code, VersionCounter),
+  LoadFun =
+    fun(PID) ->
+      try erl_py_runner_worker:load_library(PID, Library, ExpectedVersion)
+      catch _Class:Error -> {error, {load_failed, Error}}
+      end
+    end,
+  case broadcast(WorkerPIDs, LoadFun, ?DEADLINE(?TIMEOUT_LOAD_LIBRARY)) of
     {_, []} ->
       ?LOGINFO(
         "successfully loaded library ~ts on ~p workers",
@@ -159,27 +159,36 @@ do_load_library(WorkerPIDs, Name, Code, VersionCounter) ->
       ),
       ets:insert(?LIBRARIES_TAB, Library),
       {ok, NewVersionCounter};
-    {SuccessfulPIDs, BroadcastErrors} ->
+    {[], Errors} ->
       ?LOGWARNING(
-        "failed to load library ~ts on ~p workers, errors: ~p, rolling back ~p workers",
-        [Name, length(WorkerPIDs), BroadcastErrors, length(SuccessfulPIDs)]
+        "failed to load library ~ts on all workers: ~p",
+        [Name, Errors]
       ),
-      case rollback_library(SuccessfulPIDs, Library, Deadline) of
-        [] ->
-          {error, BroadcastErrors};
-        RollbackErrors ->
-          {error, BroadcastErrors, RollbackErrors}
-      end
+      {error, Errors};
+    {_SuccessfulPIDs, FailedWorkers} ->
+      ?LOGWARNING(
+        "partial broadcast failure for library ~ts, restarting ~p failed workers: ~p",
+        [Name, length(FailedWorkers), FailedWorkers]
+      ),
+      ets:insert(?LIBRARIES_TAB, Library),
+      restart_workers(FailedWorkers),
+      {ok, NewVersionCounter}
   end.
 
 do_delete_library(WorkerPIDs, Name, VersionCounter) ->
   case ets:lookup(?LIBRARIES_TAB, Name) of
     [] ->
       {error, not_found};
-    [#library{hash = Hash, version = CurrentVersion} = Library] ->
+    [#library{hash = Hash, version = CurrentVersion}] ->
       DeleteVersion = VersionCounter + 1,
       DeleteLibrary = #library{name = Name, hash = Hash, version = DeleteVersion},
-      case broadcast_delete(WorkerPIDs, DeleteLibrary, CurrentVersion, ?DEADLINE(?TIMEOUT_LOAD_LIBRARY)) of
+      DeleteFun =
+        fun(PID) ->
+          try erl_py_runner_worker:delete_library(PID, DeleteLibrary, CurrentVersion)
+          catch _Class:Error -> {error, {delete_failed, Error}}
+          end
+        end,
+      case broadcast(WorkerPIDs, DeleteFun, ?DEADLINE(?TIMEOUT_LOAD_LIBRARY)) of
         {_, []} ->
           ?LOGINFO(
             "successfully deleted library ~ts from ~p workers",
@@ -187,101 +196,48 @@ do_delete_library(WorkerPIDs, Name, VersionCounter) ->
           ),
           ets:delete(?LIBRARIES_TAB, Name),
           {ok, DeleteVersion};
-        {SuccessfulPIDs, DeleteErrors} ->
+        {[], Errors} ->
           ?LOGWARNING(
-            "failed to delete library ~ts, errors: ~p, rolling back ~p workers",
-            [Name, DeleteErrors, length(SuccessfulPIDs)]
+            "failed to delete library ~ts from all workers: ~p",
+            [Name, Errors]
           ),
-          case rollback_delete(SuccessfulPIDs, Library, DeleteVersion, ?DEADLINE(?TIMEOUT_LOAD_LIBRARY)) of
-            [] ->
-              {error, DeleteErrors};
-            RollbackErrors ->
-              {error, DeleteErrors, RollbackErrors}
-          end
+          {error, Errors};
+        {_SuccessfulPIDs, FailedWorkers} ->
+          ?LOGWARNING(
+            "partial broadcast failure for delete ~ts, restarting ~p failed workers: ~p",
+            [Name, length(FailedWorkers), FailedWorkers]
+          ),
+          ets:delete(?LIBRARIES_TAB, Name),
+          restart_workers(FailedWorkers),
+          {ok, DeleteVersion}
       end
   end.
 
 prepare_library(Name, Code, VersionCounter) ->
   Hash = crypto:hash(sha256, Code),
+  Base = #library{name = Name, code = Code, hash = Hash},
   case ets:lookup(?LIBRARIES_TAB, Name) of
     [#library{hash = Hash, version = Version, insert_order = Order}] ->
-      UpdatedLibrary =
-        #library{
-          name = Name,
-          code = Code,
-          hash = Hash,
-          version = Version,
-          insert_order = Order
-        },
-      {UpdatedLibrary, Version, VersionCounter};
+      {Base#library{version = Version, insert_order = Order}, Version, VersionCounter};
     [#library{version = Version, insert_order = Order}] ->
       NewVersion = VersionCounter + 1,
-      UpdatedLibrary =
-        #library{
-          name = Name,
-          code = Code,
-          hash = Hash,
-          version = NewVersion,
-          insert_order = Order
-        },
-      {UpdatedLibrary, Version, NewVersion};
+      {Base#library{version = NewVersion, insert_order = Order}, Version, NewVersion};
     [] ->
       NewVersion = VersionCounter + 1,
-      NewLibrary =
-        #library{
-          name = Name,
-          code = Code,
-          hash = Hash,
-          version = NewVersion,
-          insert_order = NewVersion
-        },
-      {NewLibrary, 0, NewVersion}
+      {Base#library{version = NewVersion, insert_order = NewVersion}, 0, NewVersion}
   end.
 
-rollback_library([], _Library, _Deadline) ->
-  [];
-rollback_library(SuccessfulPIDs, #library{name = Name, hash = Hash, version = Version}, Deadline) ->
-  case ets:lookup(?LIBRARIES_TAB, Name) of
-    [#library{} = PreviousLibrary] ->
-      {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, PreviousLibrary, Version, Deadline),
-      RollbackErrors;
-    [] ->
-      RollbackLibrary = #library{name = Name, hash = Hash, version = 0},
-      {_, RollbackErrors} = broadcast_delete(SuccessfulPIDs, RollbackLibrary, Version, Deadline),
-      RollbackErrors
-  end.
-
-rollback_delete([], _Library, _DeleteVersion, _Deadline) ->
-  [];
-rollback_delete(SuccessfulPIDs, #library{} = Library, DeleteVersion, Deadline) ->
-  {_, RollbackErrors} = broadcast_library(SuccessfulPIDs, Library, DeleteVersion, Deadline),
-  RollbackErrors.
-
-broadcast_library(WorkerPIDs, #library{} = Library, ExpectedVersion, Deadline) ->
-  broadcast(
-    WorkerPIDs,
-    fun(PID) ->
-      try erl_py_runner_worker:load_library(PID, Library, ExpectedVersion)
-      catch _Class:Error -> {error, {load_failed, Error}}
-      end
-    end,
-    Deadline
-  ).
-
-broadcast_delete(WorkerPIDs, #library{} = Library, ExpectedVersion, Deadline) ->
-  broadcast(
-    WorkerPIDs,
-    fun(PID) ->
-      try erl_py_runner_worker:delete_library(PID, Library, ExpectedVersion)
-      catch _Class:Error -> {error, {delete_failed, Error}}
-      end
-    end,
-    Deadline
-  ).
+restart_workers([]) ->
+  ok;
+restart_workers(FailedWorkers) ->
+  FailedPIDs = [PID || {PID, _Reason} <- FailedWorkers],
+  ?LOGWARNING("restarting ~p workers: ~p", [length(FailedPIDs), FailedWorkers]),
+  [catch exit(PID, shutdown) || PID <- FailedPIDs],
+  ok.
 
 broadcast(WorkerPIDs, RequestFun, Deadline) ->
   Owner = self(),
-  PendingRefs =
+  Pending =
     maps:from_list(
       [begin
          Ref = make_ref(),
@@ -293,31 +249,29 @@ broadcast(WorkerPIDs, RequestFun, Deadline) ->
          {Ref, PID}
        end || PID <- WorkerPIDs]
     ),
-  collect(PendingRefs, [], [], Deadline).
+  collect(#broadcast_status{pending = Pending, successful = [], errors = []}, Deadline).
 
-collect(PendingRefs, SuccessfulPIDs, Errors, _Deadline) when map_size(PendingRefs) =:= 0 ->
-  {SuccessfulPIDs, Errors};
-collect(PendingRefs, SuccessfulPIDs, Errors, Deadline) ->
-  Remaining = erlang:max(0, Deadline - erlang:monotonic_time(millisecond)),
+collect(#broadcast_status{pending = Pending, successful = Successful, errors = Errors}, _Deadline)
+    when map_size(Pending) =:= 0 ->
+  {Successful, Errors};
+collect(#broadcast_status{pending = Pending, successful = Successful, errors = Errors} = Acc, Deadline) ->
   receive
     {broadcast_reply, Ref, _PID, Result} ->
-      case maps:take(Ref, PendingRefs) of
+      case maps:take(Ref, Pending) of
         {ExpectedPID, Rest} ->
           case Result of
             ok ->
-              collect(Rest, [ExpectedPID | SuccessfulPIDs], Errors, Deadline);
+              collect(Acc#broadcast_status{pending = Rest, successful = [ExpectedPID | Successful]}, Deadline);
             {error, Reason} ->
-              collect(Rest, SuccessfulPIDs, [{ExpectedPID, Reason} | Errors], Deadline);
-            _ ->
-              collect(Rest, SuccessfulPIDs, [{ExpectedPID, invalid_reply} | Errors], Deadline)
+              collect(Acc#broadcast_status{pending = Rest, errors = [{ExpectedPID, Reason} | Errors]}, Deadline)
           end;
         error ->
-          collect(PendingRefs, SuccessfulPIDs, Errors, Deadline)
+          collect(Acc, Deadline)
       end
   after
-    Remaining ->
-      TimeoutErrors = maps:fold(fun(_Ref, PID, Acc) -> [{PID, timeout} | Acc] end, Errors, PendingRefs),
-      {SuccessfulPIDs, TimeoutErrors}
+    ?REMAINING(Deadline) ->
+      TimeoutErrors = maps:fold(fun(_Ref, PID, Acc2) -> [{PID, timeout} | Acc2] end, Errors, Pending),
+      {Successful, TimeoutErrors}
   end.
 
 sorted_libraries() ->
