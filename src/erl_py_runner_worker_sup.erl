@@ -38,18 +38,24 @@ stats() ->
     [begin
       {ID, PID, gen_server:send_request(PID, ?CALL_STATS)}
      end || {ID, PID, _, _} <- supervisor:which_children(?MODULE), is_pid(PID)],
-  [collect_worker_stats(Id, PID, Ref, ?DEADLINE(?TIMEOUT_STATS)) || {Id, PID, Ref} <- Requests].
+  lists:foldl(
+    fun({ID, PID, Reference}, Acc) ->
+      maps:merge(Acc, #{ID => collect_worker_stats(ID, PID, Reference, ?DEADLINE(?TIMEOUT_STATS))})
+    end,
+    #{},
+    Requests
+  ).
 
 collect_worker_stats(ID, PID, Ref, Deadline) ->
   case gen_server:receive_response(Ref, ?REMAINING(Deadline)) of
     {reply, Stats} ->
-      Stats#{name => ID};
+      Stats;
     timeout ->
-      #{name => ID, pid => PID, error => timeout};
+      #{pid => PID, error => timeout};
     {error, Error} ->
       ?LOGDEBUG(
         "worker ~p with pid ~p is unavailable, error: ~p",
         [ID, PID, Error]
       ),
-      #{name => ID, pid => PID, error => unavailable}
+      #{pid => PID, error => unavailable}
   end.

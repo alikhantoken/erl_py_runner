@@ -189,8 +189,8 @@ handle_call(
       }, Data};
     {stop, Reason} ->
       {stop, Reason, {error, Reason}, Data};
-    {error, _} = Error ->
-      {reply, Error, Data}
+    {error, Error} ->
+      {reply, {error, Error}, Data}
   end.
 
 handle_info(
