@@ -1,4 +1,8 @@
 #!/bin/bash
+# This script creates a Python virtual environment
+# listed in a requirements file.
+# Github Link: https://github.com/Pyrlang/Term
+# License: Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 set -euo pipefail
 
 VENV_DIR="$1"

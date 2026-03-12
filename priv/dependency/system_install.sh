@@ -1,4 +1,7 @@
 #!/bin/bash
+# This script verifies that the Pyrlang/Term library is available and installed.
+# Github Link: https://github.com/Pyrlang/Term
+# License: Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 set -euo pipefail
 
 PYTHON="${1:-python3}"

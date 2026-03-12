@@ -1,0 +1,15 @@
+Third-Party Software Notices
+============================
+
+This project includes the following third-party software. Each component is
+used in accordance with its license terms.
+
+--------------------------------------------------------------------------------
+pyrlang/Term  (vendored at priv/python/term/)
+--------------------------------------------------------------------------------
+
+Package: pyrlang-term
+Authors: All rights reserved by the original authors and contributors.
+Repository: https://github.com/Pyrlang/Term
+License: Apache License, Version 2.0, https://www.apache.org/licenses/LICENSE-2.0
+This component is vendored as-is with no functional modifications.
