@@ -19,7 +19,7 @@
   run/2, run/3, run/4,
   load_library/3,
   delete_library/3,
-  info/1
+  stats/1
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -73,8 +73,8 @@ load_library(Worker, #library{} = Library, ExpectedVersion) ->
 delete_library(Worker, #library{} = Library, ExpectedVersion) ->
   gen_server:call(Worker, ?CALL_DELETE_LIBRARY(Library, ExpectedVersion), ?TIMEOUT_LOAD_LIBRARY_CALL).
 
-info(Worker) ->
-  gen_server:call(Worker, ?CALL_INFO, ?TIMEOUT_INFO).
+stats(Worker) ->
+  gen_server:call(Worker, ?CALL_STATS, ?TIMEOUT_STATS).
 
 %%% +--------------------------------------------------------------+
 %%% |                     Gen Server Callbacks                     |
@@ -181,11 +181,21 @@ handle_call(
   end;
 
 handle_call(
-  ?CALL_INFO,
+  ?CALL_STATS,
   _Caller,
-  #data{port = Port} = Data
+  #data{port = Port, operation_timeout = Timeout} = Data
 ) ->
-  {reply, collect_port_info(Port), Data}.
+  send_port_command(Port, ?COMMAND_STATS),
+  case wait_port_response(Data, ?DEADLINE(Timeout)) of
+    {stop, port_timeout} ->
+      {stop, port_timeout, {error, timeout}, Data};
+    {stop, Reason} ->
+      {stop, Reason, {error, Reason}, Data};
+    {ok, PythonStats} ->
+      {reply, #{erlang => collect_port_info(Port), python => PythonStats}, Data};
+    {error, _} = Error ->
+      {reply, Error, Data}
+  end.
 
 handle_info(
   {Port, {exit_status, StatusCode}},
@@ -245,6 +255,8 @@ wait_port_response(
           ok;
         {ok, {Result, State}} ->
           {ok, Result, State};
+        {stats_reply, PythonStats} ->
+          {ok, PythonStats};
         {log, Level, Message} ->
           handle_log(Level, Message),
           wait_port_response(Data, Deadline);

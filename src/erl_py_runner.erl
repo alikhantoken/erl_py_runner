@@ -14,7 +14,7 @@
   load_library/2,
   delete_library/1,
   restart/0,
-  info/0
+  stats/0
 ]).
 
 %%% +--------------------------------------------------------------+
@@ -88,8 +88,9 @@ restart() ->
 
 %% BLOCKING OPERATION
 %% Returns a live snapshot of every worker in the pool, one map per worker.
-%% Workers that do not respond within the deadline appear in the list with an
-%% error field rather than being silently skipped. Used for debugging.
--spec info() -> list(map()).
-info() ->
-  erl_py_runner_worker_sup:info().
+%% Each map has two keys:
+%%   erlang => port-level metrics
+%%   python => process-level metrics
+-spec stats() -> list(map()).
+stats() ->
+  erl_py_runner_worker_sup:stats().

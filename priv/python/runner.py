@@ -21,8 +21,10 @@ from __future__ import annotations
 import builtins
 import functools
 import gc
+import resource
 import struct
 import sys
+import time
 import traceback
 import types
 
@@ -65,6 +67,8 @@ _ATOM_CALL_REPLY:     Final[Atom] = Atom("call_reply")
 _ATOM_LOG:            Final[Atom] = Atom("log")
 _ATOM_LOAD_LIBRARY:   Final[Atom] = Atom("load_library")
 _ATOM_DELETE_LIBRARY: Final[Atom] = Atom("delete_library")
+_ATOM_STATS:          Final[Atom] = Atom("stats")
+_ATOM_STATS_REPLY:    Final[Atom] = Atom("stats_reply")
 
 _ATOM_ALL:         Final[Atom] = Atom("all")
 _ATOM_MODULES:     Final[Atom] = Atom("modules")
@@ -135,6 +139,17 @@ def _to_str(value: Any) -> str:
 
 def _ok_response(result: Any) -> tuple[Atom, Any]:
     return _ATOM_OK, result
+
+
+def _read_rss_kilobytes() -> int | None:
+    """Return current RSS in kilobytes from /proc/self/status in Linux"""
+    try:
+        with open("/proc/self/status") as proc_status:
+            for line in proc_status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        return None
 
 
 def _error_response(message: str | None = None, exception: BaseException | None = None) -> tuple[Atom, dict]:
@@ -257,11 +272,16 @@ class ErlangPort:
 
 
 class ErlangCaller:
-    __slots__ = ("_port", "_next_id")
+    __slots__ = ("_port", "_next_id", "_callback_count")
 
     def __init__(self, port: ErlangPort) -> None:
         self._port = port
         self._next_id: int = 1
+        self._callback_count: int = 0
+
+    @property
+    def callback_count(self) -> int:
+        return self._callback_count
 
     def call(
         self,
@@ -270,6 +290,7 @@ class ErlangCaller:
         arguments: list[Any] | None = None,
     ) -> Any:
         """Call `Module:Function(Arguments)` in Erlang Worker Process."""
+        self._callback_count += 1
         request_id = self._next_id
         self._next_id = self._next_id % _MAX_REQUEST_ID + 1
 
@@ -397,6 +418,9 @@ class LibraryStorage:
         sys.modules.pop(name, None)
         self._entries[name] = target_entry
 
+    def list_names(self) -> list[str]:
+        return [name for name, entry in self._entries.items() if entry.loaded]
+
     @staticmethod
     def _check_name(name: str) -> None:
         top_level = name.split(".")[0]
@@ -471,7 +495,8 @@ class LibraryStorage:
 class MessageDispatcher:
     __slots__ = (
         "_safe_builtins", "_library_storage", "_caller", "_logger",
-        "_table", "_exec_count", "_gc_interval", "_compile_code",
+        "_table", "_exec_count", "_error_count", "_gc_interval",
+        "_compile_code", "_start_time",
     )
 
     def __init__(
@@ -488,12 +513,15 @@ class MessageDispatcher:
         self._caller = caller
         self._logger = logger
         self._exec_count = 0
+        self._error_count = 0
         self._gc_interval = gc_interval
         self._compile_code = self._generate_code_cache(cache_size)
+        self._start_time = time.monotonic()
         self._table: dict[Any, Callable[[Any], Any]] = {
-            _ATOM_LOAD_LIBRARY: self._handle_load_library,
+            _ATOM_LOAD_LIBRARY:   self._handle_load_library,
             _ATOM_DELETE_LIBRARY: self._handle_delete_library,
-            _ATOM_EXEC: self._handle_exec,
+            _ATOM_EXEC:           self._handle_exec,
+            _ATOM_STATS:          self._handle_stats,
         }
 
     def dispatch(self, message: Any) -> Any:
@@ -581,8 +609,10 @@ class MessageDispatcher:
             exec(self._compile_code(_to_str(code)), namespace)
             return _ok_response((namespace.get("result"), namespace.get("state")))
         except SystemExit as e:
+            self._error_count += 1
             return _error_response("SystemExit is not allowed", exception=e)
         except Exception as e:
+            self._error_count += 1
             return _error_response(exception=e)
         finally:
             namespace.clear()
@@ -610,6 +640,58 @@ class MessageDispatcher:
         """
         if (self._exec_count % self._gc_interval) == 0:
             gc.collect(0)
+
+    # ------------------------------------------------------------------
+    # Stats collection
+    # ------------------------------------------------------------------
+
+    def _handle_stats(self, _message: Any) -> Any:
+        return _ATOM_STATS_REPLY, self._collect_stats()
+
+    def _collect_stats(self) -> dict[str, Any]:
+        return {
+            "exec_count": self._exec_count,
+            "error_count": self._error_count,
+            "callback_count": self._caller.callback_count,
+            "uptime_seconds": int(time.monotonic() - self._start_time),
+            "python_version": sys.version,
+            "gc_collections": self._collect_gc_stats(),
+            "libraries": self._collect_library_stats(),
+            "memory": self._collect_memory_stats(),
+            "code_cache": self._collect_code_cache_stats(),
+        }
+
+    @staticmethod
+    def _collect_gc_stats() -> dict[str, Any]:
+        young, middle, old = gc.get_count()
+        return {
+            "young": young,
+            "middle": middle,
+            "old": old
+        }
+
+    @staticmethod
+    def _collect_memory_stats() -> dict[str, Any]:
+        return {
+            "resident_memory_kilobytes": _read_rss_kilobytes() or 0,
+            "peak_resident_memory_kilobytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        }
+
+    def _collect_library_stats(self) -> dict[str, Any]:
+        names = self._library_storage.list_names()
+        return {
+            "count": len(names),
+            "names": names
+        }
+
+    def _collect_code_cache_stats(self) -> dict[str, Any]:
+        cache_info = self._compile_code.cache_info()
+        return {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "current_size": cache_info.currsize,
+            "max_size": cache_info.maxsize,
+        }
 
 
 # ---------------------------------------------------------------------------

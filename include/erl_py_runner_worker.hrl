@@ -20,9 +20,11 @@
 -define(CALL_RUN(Code, Arguments, State, Deadline),    {run, Code, Arguments, State, Deadline}).
 -define(CALL_LOAD_LIBRARY(Library, ExpectedVersion),   {load_library, Library, ExpectedVersion}).
 -define(CALL_DELETE_LIBRARY(Library, ExpectedVersion), {delete_library, Library, ExpectedVersion}).
--define(CALL_INFO, info).
+-define(CALL_STATS, stats).
 
--define(PORT_INFO_KEYS, [connected, id, input, output, memory, os_pid, queue_size]).
+-define(COMMAND_STATS, {stats}).
+
+-define(PORT_INFO_KEYS, [id, input, output, memory, os_pid, queue_size]).
 -define(TIMEOUT_LOAD_LIBRARY_CALL, 180000).
 -define(PACKET_SIZE, 4).
 
