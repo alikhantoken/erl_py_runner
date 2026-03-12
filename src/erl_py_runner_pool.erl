@@ -38,16 +38,10 @@
 %%% +--------------------------------------------------------------+
 
 %% Called by any process that wants to run a script.
-%%   Non-Blocking: Tries to acquire a worker right away through ETS for idle workers.
-%%   Blocking: Otherwise, it calls the gen_server and waits until one is free.
+%% Calls the gen_server and waits until one free worker is returned.
 get_worker(Timeout) ->
   Deadline = ?DEADLINE(Timeout),
-  case pop_idle() of
-    {ok, Worker} ->
-      {ok, Worker};
-    empty ->
-      gen_server:call(?MODULE, ?GET_WORKER(Deadline), ?REMAINING_CALL(Deadline))
-  end.
+  gen_server:call(?MODULE, ?GET_WORKER(Deadline), ?REMAINING_CALL(Deadline)).
 
 get_workers() ->
   gen_server:call(?MODULE, ?CALL_GET_WORKERS, ?TIMEOUT_GET_WORKERS).
