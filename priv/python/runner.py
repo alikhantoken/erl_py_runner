@@ -33,6 +33,9 @@ from dataclasses import dataclass
 from typing import IO, Any, Final, NoReturn
 
 # REQUIRED IMPORTS FOR ERLANG TERM CONVERSION!
+import logging as _logging
+_logging.getLogger("term").setLevel(_logging.ERROR)
+del _logging
 from term import codec
 from term.atom import Atom
 
