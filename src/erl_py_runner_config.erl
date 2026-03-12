@@ -83,13 +83,14 @@ default() ->
 ensure(#{
   python := system
 }) ->
-  ok;
+  BashScript = filename:join(code:priv_dir(?APP_NAME), "dependency/system_install.sh"),
+  ok = run_command(BashScript, ["python3"]);
 ensure(#{
   python := environment,
   venv_dir := VenvDirectory,
   requirements := Requirements
 }) ->
-  BashScript = filename:join(code:priv_dir(?APP_NAME), "install.sh"),
+  BashScript = filename:join(code:priv_dir(?APP_NAME), "dependency/venv_install.sh"),
   ok = run_command(BashScript, [VenvDirectory, Requirements]).
   
 %%% +--------------------------------------------------------------+

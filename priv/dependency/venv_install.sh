@@ -27,7 +27,6 @@ fi
 PY="$VENV_DIR/bin/python"
 
 "$PY" -m pip install --upgrade pip setuptools wheel
-"$PY" -m pip install --no-build-isolation "git+https://github.com/Pyrlang/Term.git@1.3#egg=pyrlang-term"
 
 if [ -f "$REQUIREMENTS" ]; then
   echo "installing requirements from: $REQUIREMENTS"
